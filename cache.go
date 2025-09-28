@@ -2,8 +2,8 @@ package main
 
 import (
 	"crypto/md5"
+	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"sync"
@@ -11,8 +11,16 @@ import (
 )
 
 type CacheItem struct {
-	Data      []byte
-	ExpiresAt time.Time
+	Data       []byte
+	Headers    map[string][]string
+	StatusCode int
+	ExpiresAt  time.Time
+}
+
+type cacheMetadata struct {
+	ExpiresAt  int64               `json:"expiresAt"`
+	StatusCode int                 `json:"statusCode"`
+	Headers    map[string][]string `json:"headers"`
 }
 
 type FileCache struct {
@@ -22,123 +30,160 @@ type FileCache struct {
 }
 
 func NewFileCache(cacheDir string) *FileCache {
-	os.MkdirAll(cacheDir, 0755)
-	
+	_ = os.MkdirAll(cacheDir, 0o755)
+
 	cache := &FileCache{
 		cacheDir: cacheDir,
 		items:    make(map[string]*CacheItem),
 	}
-	
-	// 启动清理协程
+
 	go cache.cleanupLoop()
-	
+
 	return cache
 }
 
-func (c *FileCache) Set(key string, data []byte, ttl time.Duration) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	
+func (c *FileCache) Set(key string, data []byte, headers map[string][]string, statusCode int, ttl time.Duration) {
 	expiresAt := time.Now().Add(ttl)
-	
-	// 内存缓存
-	c.items[key] = &CacheItem{
-		Data:      data,
-		ExpiresAt: expiresAt,
+
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
+
+	headersCopy := make(map[string][]string, len(headers))
+	for k, values := range headers {
+		copiedValues := make([]string, len(values))
+		copy(copiedValues, values)
+		headersCopy[k] = copiedValues
 	}
-	
-	// 文件缓存
-	go c.saveToFile(key, data, expiresAt)
+
+	c.mutex.Lock()
+	c.items[key] = &CacheItem{
+		Data:       dataCopy,
+		Headers:    headersCopy,
+		StatusCode: statusCode,
+		ExpiresAt:  expiresAt,
+	}
+	c.mutex.Unlock()
+
+	go c.saveToFile(key, dataCopy, headersCopy, statusCode, expiresAt)
 }
 
-func (c *FileCache) Get(key string) ([]byte, bool) {
+func (c *FileCache) Get(key string) (*CacheItem, bool) {
 	c.mutex.RLock()
-	
-	// 先检查内存缓存
-	if item, exists := c.items[key]; exists {
-		if time.Now().Before(item.ExpiresAt) {
-			c.mutex.RUnlock()
-			return item.Data, true
-		}
-		// 过期了，删除
-		delete(c.items, key)
-	}
+	item, exists := c.items[key]
 	c.mutex.RUnlock()
-	
-	// 检查文件缓存
+
+	if exists {
+		if time.Now().Before(item.ExpiresAt) {
+			return item, true
+		}
+
+		c.mutex.Lock()
+		delete(c.items, key)
+		c.mutex.Unlock()
+	}
+
 	return c.loadFromFile(key)
 }
 
-func (c *FileCache) saveToFile(key string, data []byte, expiresAt time.Time) {
-	filename := c.getFilename(key)
-	dir := filepath.Dir(filename)
-	os.MkdirAll(dir, 0755)
-	
-	// 创建缓存文件，包含过期时间
-	cacheData := fmt.Sprintf("%d\n", expiresAt.Unix())
-	err := ioutil.WriteFile(filename, append([]byte(cacheData), data...), 0644)
+func (c *FileCache) saveToFile(key string, data []byte, headers map[string][]string, statusCode int, expiresAt time.Time) {
+	dataPath := c.getFilename(key)
+	metaPath := dataPath + ".metadata"
+	dir := filepath.Dir(dataPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		fmt.Printf("Failed to create cache directory %s: %v\n", dir, err)
+		return
+	}
+
+	if err := os.WriteFile(dataPath, data, 0o644); err != nil {
+		fmt.Printf("Failed to save cache data %s: %v\n", dataPath, err)
+		_ = os.Remove(dataPath)
+		return
+	}
+
+	meta := cacheMetadata{
+		ExpiresAt:  expiresAt.Unix(),
+		StatusCode: statusCode,
+		Headers:    headers,
+	}
+
+	metaBytes, err := json.Marshal(meta)
 	if err != nil {
-		fmt.Printf("Failed to save cache file %s: %v\n", filename, err)
+		fmt.Printf("Failed to marshal metadata for cache file %s: %v\n", dataPath, err)
+		_ = os.Remove(dataPath)
+		return
+	}
+
+	if err := os.WriteFile(metaPath, metaBytes, 0o644); err != nil {
+		fmt.Printf("Failed to save cache metadata %s: %v\n", metaPath, err)
+		_ = os.Remove(dataPath)
+		_ = os.Remove(metaPath)
 	}
 }
 
-func (c *FileCache) loadFromFile(key string) ([]byte, bool) {
-	filename := c.getFilename(key)
-	
-	data, err := ioutil.ReadFile(filename)
+func (c *FileCache) loadFromFile(key string) (*CacheItem, bool) {
+	dataPath := c.getFilename(key)
+	metaPath := dataPath + ".metadata"
+
+	metaBytes, err := os.ReadFile(metaPath)
 	if err != nil {
+		_ = os.Remove(dataPath)
+		_ = os.Remove(metaPath)
 		return nil, false
 	}
-	
-	// 解析过期时间
-	lines := string(data)
-	newlineIdx := -1
-	for i, char := range lines {
-		if char == '\n' {
-			newlineIdx = i
-			break
-		}
-	}
-	
-	if newlineIdx == -1 {
+
+	var meta cacheMetadata
+	if err := json.Unmarshal(metaBytes, &meta); err != nil {
+		_ = os.Remove(dataPath)
+		_ = os.Remove(metaPath)
 		return nil, false
 	}
-	
-	var expiresAt int64
-	_, err = fmt.Sscanf(lines[:newlineIdx], "%d", &expiresAt)
+
+	if time.Now().Unix() > meta.ExpiresAt {
+		_ = os.Remove(dataPath)
+		_ = os.Remove(metaPath)
+		return nil, false
+	}
+
+	content, err := os.ReadFile(dataPath)
 	if err != nil {
+		_ = os.Remove(dataPath)
+		_ = os.Remove(metaPath)
 		return nil, false
 	}
-	
-	// 检查是否过期
-	if time.Now().Unix() > expiresAt {
-		os.Remove(filename)
-		return nil, false
+
+	dataCopy := make([]byte, len(content))
+	copy(dataCopy, content)
+
+	headersCopy := make(map[string][]string, len(meta.Headers))
+	for k, values := range meta.Headers {
+		copied := make([]string, len(values))
+		copy(copied, values)
+		headersCopy[k] = copied
 	}
-	
-	content := data[newlineIdx+1:]
-	
-	// 添加到内存缓存
+
+	item := &CacheItem{
+		Data:       dataCopy,
+		Headers:    headersCopy,
+		StatusCode: meta.StatusCode,
+		ExpiresAt:  time.Unix(meta.ExpiresAt, 0),
+	}
+
 	c.mutex.Lock()
-	c.items[key] = &CacheItem{
-		Data:      content,
-		ExpiresAt: time.Unix(expiresAt, 0),
-	}
+	c.items[key] = item
 	c.mutex.Unlock()
-	
-	return content, true
+
+	return item, true
 }
 
 func (c *FileCache) getFilename(key string) string {
 	hash := fmt.Sprintf("%x", md5.Sum([]byte(key)))
-	// 创建两级目录结构，避免单个目录文件过多
 	return filepath.Join(c.cacheDir, hash[:2], hash[2:4], hash)
 }
 
 func (c *FileCache) cleanupLoop() {
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
-	
+
 	for range ticker.C {
 		c.cleanup()
 	}
@@ -150,9 +195,9 @@ func (c *FileCache) cleanup() {
 	for key, item := range c.items {
 		if now.After(item.ExpiresAt) {
 			delete(c.items, key)
-			// 删除对应的文件
-			filename := c.getFilename(key)
-			os.Remove(filename)
+			dataPath := c.getFilename(key)
+			_ = os.Remove(dataPath)
+			_ = os.Remove(dataPath + ".metadata")
 		}
 	}
 	c.mutex.Unlock()

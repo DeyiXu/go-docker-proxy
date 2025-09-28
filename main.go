@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -333,9 +334,9 @@ func (p *ProxyServer) handleV2Request(w http.ResponseWriter, r *http.Request) {
 
 	// 检查缓存
 	cacheKey := p.generateCacheKey(r.Host, r.URL.Path)
-	if cachedData, found := p.cache.Get(cacheKey); found {
-		if p.isCacheable(r.URL.Path) {
-			p.serveCachedResponse(w, cachedData, r.URL.Path)
+	if p.isCacheable(r.URL.Path) {
+		if cachedItem, found := p.cache.Get(cacheKey); found {
+			p.serveCachedResponse(w, cachedItem)
 			return
 		}
 	}
@@ -380,12 +381,13 @@ func (p *ProxyServer) proxyRequestWithRoundTrip(w http.ResponseWriter, r *http.R
 		}
 	}
 
-	// 复制响应
-	if enableCache {
+	shouldCache := enableCache && p.isCacheable(r.URL.Path)
+
+	if shouldCache {
 		cacheKey := p.generateCacheKey(r.Host, r.URL.Path)
-		p.copyResponseWithCacheRoundTrip(w, resp, cacheKey)
+		p.copyResponseWithCacheRoundTrip(w, resp, cacheKey, true)
 	} else {
-		p.copyResponseRoundTrip(w, resp)
+		p.copyResponseWithCacheRoundTrip(w, resp, "", false)
 	}
 }
 
@@ -585,7 +587,7 @@ func (p *ProxyServer) copyResponseRoundTrip(w http.ResponseWriter, resp *http.Re
 }
 
 // 带缓存的响应复制（RoundTrip版本）
-func (p *ProxyServer) copyResponseWithCacheRoundTrip(w http.ResponseWriter, resp *http.Response, cacheKey string) {
+func (p *ProxyServer) copyResponseWithCacheRoundTrip(w http.ResponseWriter, resp *http.Response, cacheKey string, shouldStore bool) {
 	skipHeaders := map[string]bool{
 		"Connection":        true,
 		"Proxy-Connection":  true,
@@ -593,58 +595,66 @@ func (p *ProxyServer) copyResponseWithCacheRoundTrip(w http.ResponseWriter, resp
 		"Transfer-Encoding": true,
 	}
 
+	headersToCache := make(map[string][]string)
 	for key, values := range resp.Header {
-		if !skipHeaders[key] {
-			for _, value := range values {
-				w.Header().Add(key, value)
-			}
+		if skipHeaders[key] {
+			continue
+		}
+		headersToCache[key] = append(headersToCache[key], values...)
+	}
+
+	for key, values := range headersToCache {
+		for _, value := range values {
+			w.Header().Add(key, value)
 		}
 	}
 
+	if resp.Body == nil {
+		w.WriteHeader(resp.StatusCode)
+		return
+	}
+
+	if !shouldStore || resp.StatusCode != http.StatusOK {
+		w.WriteHeader(resp.StatusCode)
+		if _, err := io.Copy(w, resp.Body); err != nil {
+			fmt.Printf("proxy copy error: %v\n", err)
+		}
+		return
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		w.WriteHeader(resp.StatusCode)
+		if len(bodyBytes) > 0 {
+			_, _ = w.Write(bodyBytes)
+		}
+		fmt.Printf("proxy cache read error: %v\n", err)
+		return
+	}
+
+	headersToCache["Content-Length"] = []string{strconv.Itoa(len(bodyBytes))}
+
+	w.Header().Set("X-Cache", "MISS")
 	w.WriteHeader(resp.StatusCode)
-
-	if resp.Body != nil {
-		if p.isCacheable(cacheKey) && resp.StatusCode == http.StatusOK {
-			// 使用内存缓冲收集数据
-			var allData []byte
-			buf := make([]byte, 32*1024)
-
-			for {
-				n, err := resp.Body.Read(buf)
-				if n > 0 {
-					chunk := make([]byte, n)
-					copy(chunk, buf[:n])
-					allData = append(allData, chunk...)
-
-					if _, writeErr := w.Write(chunk); writeErr != nil {
-						return
-					}
-				}
-				if err != nil {
-					break
-				}
-			}
-
-			// 异步缓存数据
-			if len(allData) > 0 {
-				go func() {
-					p.cache.Set(cacheKey, allData, 1*time.Hour)
-				}()
-			}
-		} else {
-			// 直接复制，不缓存
-			p.copyResponseRoundTrip(w, resp)
-			return
-		}
+	if len(bodyBytes) > 0 {
+		_, _ = w.Write(bodyBytes)
 	}
+
+	go p.cache.Set(cacheKey, bodyBytes, headersToCache, resp.StatusCode, 1*time.Hour)
 }
 
-func (p *ProxyServer) serveCachedResponse(w http.ResponseWriter, data []byte, path string) {
-	contentType := p.getContentType(path)
-	w.Header().Set("Content-Type", contentType)
+func (p *ProxyServer) serveCachedResponse(w http.ResponseWriter, item *CacheItem) {
+	for key, values := range item.Headers {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+
 	w.Header().Set("X-Cache", "HIT")
-	w.WriteHeader(http.StatusOK)
-	w.Write(data)
+	w.WriteHeader(item.StatusCode)
+	if len(item.Data) > 0 {
+		_, _ = w.Write(item.Data)
+	}
 }
 
 func (p *ProxyServer) writeRoutesResponse(w http.ResponseWriter) {
@@ -663,16 +673,6 @@ func (p *ProxyServer) generateCacheKey(host, path string) string {
 func (p *ProxyServer) isCacheable(path string) bool {
 	return strings.Contains(path, "/manifests/") ||
 		strings.Contains(path, "/blobs/sha256:")
-}
-
-func (p *ProxyServer) getContentType(path string) string {
-	if strings.Contains(path, "/manifests/") {
-		return "application/vnd.docker.distribution.manifest.v2+json"
-	}
-	if strings.Contains(path, "/blobs/") {
-		return "application/octet-stream"
-	}
-	return "application/json"
 }
 
 func (p *ProxyServer) writeErrorResponse(w http.ResponseWriter, message string, statusCode int) {
