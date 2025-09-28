@@ -47,28 +47,28 @@ func main() {
 	}
 
 	server := NewProxyServer()
-	
+
 	// 优雅关闭
 	go func() {
 		c := make(chan os.Signal, 1)
 		signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 		<-c
-		
+
 		log.Println("Shutting down server...")
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		
+
 		if err := server.Shutdown(ctx); err != nil {
 			log.Printf("Server shutdown error: %v", err)
 		}
 	}()
-	
+
 	server.Start()
 }
 
 func NewProxyServer() *ProxyServer {
 	customDomain := getEnv("CUSTOM_DOMAIN", "example.com")
-	
+
 	config := &Config{
 		Port:         getEnv("PORT", "8080"),
 		CacheDir:     getEnv("CACHE_DIR", "./cache"),
@@ -87,16 +87,16 @@ func NewProxyServer() *ProxyServer {
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
-		
+
 		// TLS 配置
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: false,
 			MinVersion:         tls.VersionTLS12,
 		},
-		
+
 		// 启用 HTTP/2
 		ForceAttemptHTTP2: true,
-		
+
 		// 禁用压缩，让客户端直接处理
 		DisableCompression: true,
 	}
@@ -111,18 +111,18 @@ func NewProxyServer() *ProxyServer {
 // 根据自定义域名构建路由映射，完全参考原版 cloudflare-docker-proxy
 func buildRoutes(customDomain string) map[string]string {
 	dockerHub := "https://registry-1.docker.io"
-	
+
 	routes := map[string]string{
 		// production - 完全按照原版的命名规则
-		fmt.Sprintf("registry.docker.%s", customDomain):           dockerHub,
-		fmt.Sprintf("quay.registry.docker.%s", customDomain):      "https://quay.io",
-		fmt.Sprintf("gcr.registry.docker.%s", customDomain):       "https://gcr.io",
-		fmt.Sprintf("k8s-gcr.registry.docker.%s", customDomain):   "https://k8s.gcr.io",
-		fmt.Sprintf("k8s.registry.docker.%s", customDomain):       "https://registry.k8s.io",
-		fmt.Sprintf("ghcr.registry.docker.%s", customDomain):      "https://ghcr.io",
+		fmt.Sprintf("registry.docker.%s", customDomain):            dockerHub,
+		fmt.Sprintf("quay.registry.docker.%s", customDomain):       "https://quay.io",
+		fmt.Sprintf("gcr.registry.docker.%s", customDomain):        "https://gcr.io",
+		fmt.Sprintf("k8s-gcr.registry.docker.%s", customDomain):    "https://k8s.gcr.io",
+		fmt.Sprintf("k8s.registry.docker.%s", customDomain):        "https://registry.k8s.io",
+		fmt.Sprintf("ghcr.registry.docker.%s", customDomain):       "https://ghcr.io",
 		fmt.Sprintf("cloudsmith.registry.docker.%s", customDomain): "https://docker.cloudsmith.io",
-		fmt.Sprintf("ecr.registry.docker.%s", customDomain):       "https://public.ecr.aws",
-		
+		fmt.Sprintf("ecr.registry.docker.%s", customDomain):        "https://public.ecr.aws",
+
 		// staging
 		fmt.Sprintf("docker-staging.registry.docker.%s", customDomain): dockerHub,
 	}
@@ -149,7 +149,7 @@ func (p *ProxyServer) Start() {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(60 * time.Second))
-	
+
 	if p.config.Debug {
 		r.Use(middleware.RequestID)
 	}
@@ -169,7 +169,7 @@ func (p *ProxyServer) Start() {
 	log.Printf("Starting proxy server on port %s", p.config.Port)
 	log.Printf("Custom domain: %s", p.config.CustomDomain)
 	log.Printf("Cache directory: %s", p.config.CacheDir)
-	
+
 	// 打印路由配置
 	if p.config.Debug {
 		log.Println("Available routes:")
@@ -177,16 +177,16 @@ func (p *ProxyServer) Start() {
 			log.Printf("  %s -> %s", host, upstream)
 		}
 	}
-	
+
 	p.server = &http.Server{
 		Addr:    ":" + p.config.Port,
 		Handler: r,
-		
+
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
-	
+
 	log.Fatal(p.server.ListenAndServe())
 }
 
@@ -201,14 +201,14 @@ func (p *ProxyServer) Shutdown(ctx context.Context) error {
 func (p *ProxyServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	
+
 	health := map[string]interface{}{
 		"status":    "healthy",
 		"timestamp": time.Now().UTC().Format(time.RFC3339),
 		"version":   "1.0.0",
 		"uptime":    time.Since(startTime).String(),
 	}
-	
+
 	json.NewEncoder(w).Encode(health)
 }
 
@@ -218,7 +218,7 @@ var startTime = time.Now()
 func performHealthCheck() {
 	port := getEnv("PORT", "8080")
 	url := fmt.Sprintf("http://localhost:%s/health", port)
-	
+
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
@@ -226,12 +226,12 @@ func performHealthCheck() {
 		os.Exit(1)
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("Health check failed: status code %d", resp.StatusCode)
 		os.Exit(1)
 	}
-	
+
 	log.Println("Health check passed")
 }
 
@@ -242,7 +242,7 @@ func (p *ProxyServer) handleRoot(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"routes": p.config.Routes,
+			"routes":  p.config.Routes,
 			"message": "Available registry routes",
 		})
 		return
@@ -490,9 +490,9 @@ func (p *ProxyServer) responseUnauthorized(w http.ResponseWriter, r *http.Reques
 
 	var authHeader string
 	if p.config.Debug {
-		authHeader = fmt.Sprintf(`Bearer realm="http://%s/v2/auth",service="go-docker-proxy"`, r.Host)
+		authHeader = fmt.Sprintf(`Bearer realm="%s://%s/v2/auth",service="go-docker-proxy"`, scheme, r.Host)
 	} else {
-		authHeader = fmt.Sprintf(`Bearer realm="https://%s/v2/auth",service="go-docker-proxy"`, hostname)
+		authHeader = fmt.Sprintf(`Bearer realm="%s://%s/v2/auth",service="go-docker-proxy"`, scheme, hostname)
 	}
 
 	w.Header().Set("WWW-Authenticate", authHeader)
@@ -537,7 +537,7 @@ func (p *ProxyServer) createProxyRequest(originalReq *http.Request, targetURL *u
 	// 设置正确的 Host
 	req.Host = targetURL.Host
 	req.Header.Set("Host", targetURL.Host)
-	
+
 	// 设置 User-Agent
 	if req.Header.Get("User-Agent") == "" {
 		req.Header.Set("User-Agent", "go-docker-proxy/1.0")
@@ -608,14 +608,14 @@ func (p *ProxyServer) copyResponseWithCacheRoundTrip(w http.ResponseWriter, resp
 			// 使用内存缓冲收集数据
 			var allData []byte
 			buf := make([]byte, 32*1024)
-			
+
 			for {
 				n, err := resp.Body.Read(buf)
 				if n > 0 {
 					chunk := make([]byte, n)
 					copy(chunk, buf[:n])
 					allData = append(allData, chunk...)
-					
+
 					if _, writeErr := w.Write(chunk); writeErr != nil {
 						return
 					}
@@ -624,7 +624,7 @@ func (p *ProxyServer) copyResponseWithCacheRoundTrip(w http.ResponseWriter, resp
 					break
 				}
 			}
-			
+
 			// 异步缓存数据
 			if len(allData) > 0 {
 				go func() {
@@ -651,7 +651,7 @@ func (p *ProxyServer) writeRoutesResponse(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusNotFound)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"routes": p.config.Routes,
+		"routes":  p.config.Routes,
 		"message": "Available registry routes",
 	})
 }

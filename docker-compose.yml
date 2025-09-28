@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  go-docker-proxy:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - CACHE_DIR=/cache
+      - DEBUG=false
+      - CUSTOM_DOMAIN=example.com
+      - TARGET_UPSTREAM=https://registry-1.docker.io
+    volumes:
+      - cache_data:/cache
+    restart: unless-stopped
+    healthcheck:
+      test: ["/go-docker-proxy", "-health-check"]
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+volumes:
+  cache_data:
