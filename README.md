@@ -25,7 +25,7 @@ cd go-docker-proxy
 export CUSTOM_DOMAIN=your-domain.com
 
 # 启动服务
-docker-compose up -d
+docker compose up -d
 ```
 
 ### 本地开发
