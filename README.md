@@ -21,6 +21,9 @@
 git clone https://github.com/DeyiXu/go-docker-proxy.git
 cd go-docker-proxy
 
+# 创建持久化缓存目录
+mkdir -p cache
+
 # 设置自定义域名
 export CUSTOM_DOMAIN=your-domain.com
 
