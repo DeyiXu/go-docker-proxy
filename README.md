@@ -1,16 +1,36 @@
 # Go Docker Proxy
 
-基于Go语言实现的Docker镜像代理服务，完全兼容 `cloudflare-docker-proxy` 的路由规则和功能。
+基于Go语言实现的Docker镜像代理服务，完全兼容 [ciiiii/cloudflare-docker-proxy](https://github.com/ciiiii/cloudflare-docker-proxy) 的路由规则和功能。
 
 ## 特性
 
-- 🚀 完全兼容原版 `cloudflare-docker-proxy` 的路由配置
+- 🚀 **完全兼容** [ciiiii/cloudflare-docker-proxy](https://github.com/ciiiii/cloudflare-docker-proxy) 的路由配置
 - 🎯 支持多个Docker镜像仓库代理（Docker Hub、Quay、GCR、GHCR等）
-- 💾 实现文件缓存，提升访问速度  
-- 🔐 完整的Docker Hub认证处理
-- 🔄 支持Docker Hub library镜像自动重定向
-- ⚡ 使用 `transport.RoundTrip` 提供最佳性能
-- 🐳 轻量级，易于部署
+- 💾 独立设计的两层缓存系统(内存索引+磁盘存储)，专为 Docker Registry 优化
+- 🔐 完整的Docker Registry V2认证流程
+- 🔄 自动处理Docker Hub library镜像重定向
+- ⚡ 使用 `http.Transport.RoundTrip` 提供最佳性能
+- 🌏 **针对境外部署优化**，支持中国大陆高速访问
+- 📝 详细的调试日志支持
+- 🐳 轻量级，易于部署和维护
+- 📚 完整的文档体系
+
+## 📖 文档导航
+
+### 快速开始
+- **[快速开始指南](./QUICKSTART.md)** - 10分钟完成境外部署 🚀
+
+### 部署文档
+- **[境外部署完整指南](./DEPLOYMENT_CN.md)** - 境外部署详细指南(中国大陆访问优化) ⭐
+- **[网络优化配置](./NETWORK_OPTIMIZATION.md)** - 系统和应用层网络优化详解
+
+### 技术文档
+- **[架构文档](./ARCHITECTURE.md)** - 系统架构和设计原理
+- **[变更日志](./CHANGELOG.md)** - 版本更新记录
+
+### 实用工具
+- **`deploy-overseas.sh`** - 一键部署脚本(自动安装和配置)
+- **`monitor.sh`** - 服务监控脚本(实时状态、日志、性能测试)
 
 ## 快速开始
 
@@ -56,28 +76,20 @@ go run .
 
 ### 路由配置
 
-服务会根据 `CUSTOM_DOMAIN` 自动生成以下路由规则：
+服务会根据 `CUSTOM_DOMAIN` 自动生成以下路由规则（与 ciiiii/cloudflare-docker-proxy 完全兼容）：
 
 #### 生产环境路由
-- `registry.docker.{CUSTOM_DOMAIN}` → Docker Hub
-- `quay.registry.docker.{CUSTOM_DOMAIN}` → Quay.io
-- `gcr.registry.docker.{CUSTOM_DOMAIN}` → Google Container Registry
-- `k8s-gcr.registry.docker.{CUSTOM_DOMAIN}` → Kubernetes GCR
-- `k8s.registry.docker.{CUSTOM_DOMAIN}` → Kubernetes Registry
-- `ghcr.registry.docker.{CUSTOM_DOMAIN}` → GitHub Container Registry
-- `cloudsmith.registry.docker.{CUSTOM_DOMAIN}` → Cloudsmith Docker
-- `ecr.registry.docker.{CUSTOM_DOMAIN}` → AWS ECR Public
-
-#### 简化路由（仅生产环境）
 - `docker.{CUSTOM_DOMAIN}` → Docker Hub
-- `hub.{CUSTOM_DOMAIN}` → Docker Hub
-- `registry.{CUSTOM_DOMAIN}` → Docker Hub
+- `quay.{CUSTOM_DOMAIN}` → Quay.io
+- `gcr.{CUSTOM_DOMAIN}` → Google Container Registry
+- `k8s-gcr.{CUSTOM_DOMAIN}` → Kubernetes GCR
+- `k8s.{CUSTOM_DOMAIN}` → Kubernetes Registry
+- `ghcr.{CUSTOM_DOMAIN}` → GitHub Container Registry
+- `cloudsmith.{CUSTOM_DOMAIN}` → Cloudsmith Docker
+- `ecr.{CUSTOM_DOMAIN}` → AWS ECR Public
 
-#### 本地开发路由
-当 `CUSTOM_DOMAIN=localhost` 时：
-- `docker.localhost` → Docker Hub
-- `hub.localhost` → Docker Hub
-- `registry.localhost` → Docker Hub
+#### 过渡路由
+- `docker-staging.{CUSTOM_DOMAIN}` → Docker Hub (staging)
 
 ## 使用方法
 
@@ -87,14 +99,16 @@ go run .
 # 方法1: 修改 /etc/docker/daemon.json
 {
   "registry-mirrors": [
-    "https://registry.docker.your-domain.com"
+    "https://docker.your-domain.com"
   ]
 }
 
 # 方法2: 直接使用完整镜像名
-docker pull registry.docker.your-domain.com/library/nginx:latest
-docker pull quay.registry.docker.your-domain.com/prometheus/prometheus:latest
-docker pull gcr.registry.docker.your-domain.com/google-containers/pause:latest
+docker pull docker.your-domain.com/library/nginx:latest
+docker pull quay.your-domain.com/prometheus/prometheus:latest
+docker pull gcr.your-domain.com/google-containers/pause:latest
+docker pull ghcr.your-domain.com/owner/repo:latest
+docker pull k8s.your-domain.com/kube-apiserver:latest
 ```
 
 ### DNS 配置
@@ -102,12 +116,35 @@ docker pull gcr.registry.docker.your-domain.com/google-containers/pause:latest
 如需使用自定义域名，请配置 DNS：
 
 ```dns
-# A 记录
-registry.docker.your-domain.com     A     YOUR_SERVER_IP
-quay.registry.docker.your-domain.com   A     YOUR_SERVER_IP
-gcr.registry.docker.your-domain.com    A     YOUR_SERVER_IP
+# A 记录（与 ciiiii/cloudflare-docker-proxy 完全兼容）
+docker.your-domain.com       A     YOUR_SERVER_IP
+quay.your-domain.com         A     YOUR_SERVER_IP
+gcr.your-domain.com          A     YOUR_SERVER_IP
+k8s.your-domain.com          A     YOUR_SERVER_IP
+ghcr.your-domain.com         A     YOUR_SERVER_IP
 # ... 其他子域名
 ```
+
+## 与 Cloudflare Worker 版本的对比
+
+| 功能 | ciiiii/cloudflare-docker-proxy | go-docker-proxy |
+|------|-------------------------------|-----------------|
+| 路由规则 | ✅ 完全一致 | ✅ 完全一致 |
+| 多仓库支持 | ✅ | ✅ |
+| Docker Hub 认证 | ✅ | ✅ |
+| Library 镜像重定向 | ✅ | ✅ |
+| 文件缓存 | ❌ (Workers KV) | ✅ 磁盘缓存 |
+| 自托管部署 | ❌ | ✅ |
+| 调试日志 | 有限 | ✅ 详细日志 |
+| 运行环境 | Cloudflare Workers | 任意服务器 |
+
+### 从 Cloudflare Worker 迁移
+
+无需修改任何配置！只需：
+
+1. 使用相同的 `CUSTOM_DOMAIN` 环境变量
+2. DNS 记录指向你的服务器
+3. 所有路由完全兼容，无需修改 Docker 配置
 
 ## API接口
 
@@ -150,6 +187,60 @@ curl http://unknown-domain.com:8080/
 - 智能重定向处理
 
 ## 部署建议
+
+### 境外部署 - 中国大陆访问优化 🌏
+
+**如果您需要部署在境外服务器,同时保证中国大陆用户能够正常访问,请查看详细的部署指南:**
+
+👉 **[境外部署完整指南](./DEPLOYMENT_CN.md)** - 包含:
+- 地理位置选择建议(香港/新加坡/东京)
+- 网络层优化(BBR、连接池、HTTP/2)
+- CDN加速配置(Cloudflare 免费方案)
+- Nginx 反向代理配置
+- SSL证书自动化
+- 性能监控和故障排查
+
+#### 一键部署脚本
+
+```bash
+# 下载项目
+git clone https://github.com/DeyiXu/go-docker-proxy.git
+cd go-docker-proxy
+
+# 上传到境外服务器后,运行一键部署脚本
+sudo ./deploy-overseas.sh
+```
+
+脚本会自动完成:
+- ✅ 安装 Docker 和依赖
+- ✅ 优化网络参数(BBR拥塞控制)
+- ✅ 配置防火墙规则
+- ✅ 部署应用容器
+- ✅ 可选安装 Nginx + SSL
+
+#### 推荐部署架构
+
+```
+中国大陆用户
+    ↓
+Cloudflare CDN (免费)
+    ↓
+境外服务器(香港/新加坡/东京)
+    ↓
+Nginx (反向代理 + SSL)
+    ↓
+go-docker-proxy (Docker容器)
+    ↓
+Docker Hub / Quay / GCR 等上游仓库
+```
+
+#### 性能参考
+
+| 部署地区 | 延迟(中国大陆) | 下载速度 | 推荐度 |
+|---------|-------------|---------|--------|
+| 香港     | 20-50ms     | 10-50MB/s | ⭐⭐⭐⭐⭐ |
+| 新加坡   | 60-100ms    | 5-30MB/s  | ⭐⭐⭐⭐ |
+| 东京     | 80-120ms    | 5-20MB/s  | ⭐⭐⭐⭐ |
 
 ### 生产环境
 1. 使用 HTTPS 证书

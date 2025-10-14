@@ -109,35 +109,23 @@ func NewProxyServer() *ProxyServer {
 	}
 }
 
-// 根据自定义域名构建路由映射，完全参考原版 cloudflare-docker-proxy
+// 根据自定义域名构建路由映射，参考 ciiiii/cloudflare-docker-proxy
 func buildRoutes(customDomain string) map[string]string {
 	dockerHub := "https://registry-1.docker.io"
 
 	routes := map[string]string{
-		// production - 完全按照原版的命名规则
-		fmt.Sprintf("registry.docker.%s", customDomain):            dockerHub,
-		fmt.Sprintf("quay.registry.docker.%s", customDomain):       "https://quay.io",
-		fmt.Sprintf("gcr.registry.docker.%s", customDomain):        "https://gcr.io",
-		fmt.Sprintf("k8s-gcr.registry.docker.%s", customDomain):    "https://k8s.gcr.io",
-		fmt.Sprintf("k8s.registry.docker.%s", customDomain):        "https://registry.k8s.io",
-		fmt.Sprintf("ghcr.registry.docker.%s", customDomain):       "https://ghcr.io",
-		fmt.Sprintf("cloudsmith.registry.docker.%s", customDomain): "https://docker.cloudsmith.io",
-		fmt.Sprintf("ecr.registry.docker.%s", customDomain):        "https://public.ecr.aws",
+		// production - 使用 ciiiii 版本的简洁命名规则
+		fmt.Sprintf("docker.%s", customDomain):     dockerHub,
+		fmt.Sprintf("quay.%s", customDomain):       "https://quay.io",
+		fmt.Sprintf("gcr.%s", customDomain):        "https://gcr.io",
+		fmt.Sprintf("k8s-gcr.%s", customDomain):    "https://k8s.gcr.io",
+		fmt.Sprintf("k8s.%s", customDomain):        "https://registry.k8s.io",
+		fmt.Sprintf("ghcr.%s", customDomain):       "https://ghcr.io",
+		fmt.Sprintf("cloudsmith.%s", customDomain): "https://docker.cloudsmith.io",
+		fmt.Sprintf("ecr.%s", customDomain):        "https://public.ecr.aws",
 
 		// staging
-		fmt.Sprintf("docker-staging.registry.docker.%s", customDomain): dockerHub,
-	}
-
-	// 添加一些常用的简化域名
-	if customDomain != "localhost" {
-		routes[fmt.Sprintf("docker.%s", customDomain)] = dockerHub
-		routes[fmt.Sprintf("hub.%s", customDomain)] = dockerHub
-		routes[fmt.Sprintf("registry.%s", customDomain)] = dockerHub
-	} else {
-		// 本地开发时的简化配置
-		routes["docker.localhost"] = dockerHub
-		routes["hub.localhost"] = dockerHub
-		routes["registry.localhost"] = dockerHub
+		fmt.Sprintf("docker-staging.%s", customDomain): dockerHub,
 	}
 
 	return routes
@@ -259,7 +247,23 @@ func (p *ProxyServer) handleV2Root(w http.ResponseWriter, r *http.Request) {
 	}
 
 	upstreamURL, _ := url.Parse(upstream + "/v2/")
-	p.proxyRequestWithRoundTrip(w, r, upstreamURL, false)
+	req := p.createProxyRequest(r, upstreamURL)
+
+	// 检查是否需要认证
+	resp, err := p.transport.RoundTrip(req)
+	if err != nil {
+		p.writeErrorResponse(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+
+	// 如果返回 401，返回认证挑战
+	if resp.StatusCode == http.StatusUnauthorized {
+		p.responseUnauthorized(w, r)
+		return
+	}
+
+	p.copyResponseRoundTrip(w, resp)
 }
 
 func (p *ProxyServer) handleAuth(w http.ResponseWriter, r *http.Request) {

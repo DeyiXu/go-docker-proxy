@@ -6,7 +6,7 @@ services:
     environment:
       - PORT=8080
       - CACHE_DIR=/cache
-      - DEBUG=false
+      - DEBUG=true
       - CUSTOM_DOMAIN=example.com
       - TARGET_UPSTREAM=https://registry-1.docker.io
     volumes:
