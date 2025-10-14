@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# 境外服务器快速部署脚本
+# Docker Registry 代理快速部署脚本
 # 适用于: Ubuntu 20.04+, Debian 11+, CentOS 8+
 #
 set -e

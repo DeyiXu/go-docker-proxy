@@ -14,14 +14,14 @@ go-docker-proxy/
 │   └── .env.example               # 环境变量示例
 │
 ├── 🛠️ 部署脚本
-│   ├── deploy-overseas.sh         # 一键部署脚本(境外服务器)
+│   ├── deploy-overseas.sh         # 一键部署脚本(远程服务器)
 │   ├── monitor.sh                 # 服务监控脚本
 │   └── test.sh                    # 功能测试脚本
 │
 ├── 📚 文档系统
 │   ├── README.md                  # 项目主文档
 │   ├── QUICKSTART.md              # 快速开始指南(10分钟部署)
-│   ├── DEPLOYMENT_CN.md           # 境外部署完整指南
+│   ├── DEPLOYMENT_CN.md           # 远程部署完整指南
 │   ├── NETWORK_OPTIMIZATION.md    # 网络优化配置详解
 │   ├── OPTIMIZATION_SUMMARY.md    # 优化总结
 │   ├── ARCHITECTURE.md            # 系统架构文档
@@ -58,11 +58,11 @@ go-docker-proxy/
 ### 🚀 部署文档(推荐)
 
 #### 3. [DEPLOYMENT_CN.md](./DEPLOYMENT_CN.md) ⭐⭐⭐
-- **内容**: 境外部署完整指南(中国大陆访问优化)
+- **内容**: 远程部署完整指南(目标区域访问优化)
 - **适合**: 需要详细了解部署细节的用户
 - **阅读时间**: 30分钟
 - **包含**:
-  - 地理位置选择(香港/新加坡/东京)
+  - 地理位置选择(亚太A区/新加坡/东京)
   - DNS配置(智能解析)
   - CDN配置(Cloudflare)
   - Nginx反向代理
@@ -128,7 +128,7 @@ sudo ./deploy-overseas.sh
 - ✅ 配置Nginx(可选)
 - ✅ 配置SSL证书(可选)
 
-**适用场景**: 首次部署到境外服务器
+**适用场景**: 首次部署到远程服务器
 
 **执行时间**: 5-10分钟
 

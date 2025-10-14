@@ -1,4 +1,4 @@
-# 网络优化配置 - 针对境外部署中国大陆访问
+# 网络优化配置指南
 
 ## 系统级网络优化
 
@@ -108,7 +108,7 @@ transport := &http.Transport{
 
 针对不同地区的推荐配置:
 
-#### 香港部署
+#### 亚太A区部署
 ```bash
 # .env
 PORT=8080
@@ -117,7 +117,7 @@ DEBUG=false
 CUSTOM_DOMAIN=yourdomain.com
 TARGET_UPSTREAM=https://registry-1.docker.io
 
-# 对于中国大陆访问,香港延迟最低(20-50ms)
+# 对于目标区域访问,亚太A区延迟最低(20-50ms)
 # 不需要特殊调整
 ```
 
@@ -423,7 +423,7 @@ tail -n 10000 $LOG_FILE | awk '{sum+=$10} END {printf "%.2f GB\n", sum/1024/1024
 ### 1. 延迟测试
 
 ```bash
-# 从中国大陆测试延迟
+# 从目标区域测试延迟
 ping -c 100 docker.yourdomain.com | tail -1
 
 # TCP 连接延迟
@@ -525,4 +525,4 @@ df -h
 ✅ **代理层面**: Nginx 反向代理 + 缓存  
 ✅ **CDN层面**: Cloudflare 边缘缓存  
 
-可以使境外部署的服务达到最佳的中国大陆访问性能。
+可以使远程部署的服务达到最佳的目标区域访问性能。

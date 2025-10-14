@@ -1,8 +1,8 @@
-# 境外部署 - 中国大陆访问优化指南
+# 全球部署优化指南
 
 ## 概述
 
-本指南专门针对将服务部署在境外,同时确保中国大陆用户能够正常访问的场景。
+本指南提供详细的部署方案,帮助您在全球范围内部署服务,确保各地用户都能获得良好的访问体验。
 
 ## 核心优化策略
 
@@ -10,32 +10,32 @@
 
 #### 1.1 选择合适的部署地区
 
-**推荐地区**(按优先级排序):
+**推荐地区**(按网络性能排序):
 
-1. **香港** - 距离近,延迟低(20-50ms)
+1. **亚太区域 A** - 延迟低(20-50ms)
    - AWS ap-east-1
    - Azure East Asia
    - Google Cloud asia-east2
-   - 阿里云国际/腾讯云国际香港区
+   - 其他主流云服务商亚太节点
 
-2. **新加坡** - 延迟适中(60-100ms),网络稳定
+2. **亚太区域 B** - 延迟适中(60-100ms),网络稳定
    - AWS ap-southeast-1
    - Azure Southeast Asia
    - Google Cloud asia-southeast1
 
-3. **日本东京** - 延迟可接受(80-120ms)
+3. **亚太区域 C** - 延迟可接受(80-120ms)
    - AWS ap-northeast-1
    - Azure Japan East
    - Google Cloud asia-northeast1
 
-4. **美国西海岸** - 备选方案(150-200ms)
+4. **美洲西部** - 备选方案(150-200ms)
    - AWS us-west-1/2
    - Azure West US
    - Google Cloud us-west1
 
-**避免地区**:
-- 欧洲(延迟过高 250ms+)
-- 澳大利亚(延迟高且不稳定)
+**性能考虑**:
+- 欧洲区域(延迟较高 250ms+)
+- 大洋洲区域(延迟高且不稳定)
 
 #### 1.2 TCP/网络优化
 
@@ -108,7 +108,7 @@ sudo ./optimize-network.sh
 配置多个DNS A记录,实现就近访问:
 
 ```
-docker.yourdomain.com  A  <香港服务器IP>     TTL 300
+docker.yourdomain.com  A  <亚太A区服务器IP>     TTL 300
 docker.yourdomain.com  A  <新加坡服务器IP>   TTL 300
 docker.yourdomain.com  A  <东京服务器IP>     TTL 300
 ```
@@ -119,7 +119,7 @@ docker.yourdomain.com  A  <东京服务器IP>     TTL 300
 
 - **Cloudflare**: 免费,支持地理位置路由
 - **AWS Route 53**: 支持延迟路由策略
-- **DNSPod(国际版)**: 专门优化中国大陆访问
+- **DNSPod(国际版)**: 专门优化目标区域访问
 
 配置示例(Cloudflare):
 ```
@@ -135,7 +135,7 @@ docker.yourdomain.com  A  <东京服务器IP>     TTL 300
 
 **优势**:
 - 免费
-- 在中国大陆有多个节点
+- 在目标区域有多个节点
 - 自动启用 HTTP/2/3
 - DDoS 防护
 
@@ -370,7 +370,7 @@ echo -e "\n=== 4. Docker Registry V2 API 检查 ==="
 curl -s -o /dev/null -w "%{http_code}" https://$DOMAIN/v2/
 echo ""
 
-echo -e "\n=== 5. 延迟测试(从中国大陆) ==="
+echo -e "\n=== 5. 延迟测试(从目标区域) ==="
 ping -c 4 $DOMAIN
 
 echo -e "\n=== 6. HTTP/2 支持检查 ==="
@@ -386,7 +386,7 @@ echo -e "\n=== 部署检查完成 ==="
 
 #### 7.1 配置 Docker daemon
 
-在中国大陆的服务器上配置:
+在目标区域的服务器上配置:
 
 ```bash
 # /etc/docker/daemon.json
@@ -425,9 +425,9 @@ time docker pull docker.yourdomain.com/library/alpine:latest
 
 根据实际部署经验,以下是不同地区的参考性能:
 
-| 部署地区 | 延迟(中国大陆) | 下载速度 | 推荐度 |
+| 部署地区 | 延迟(目标区域) | 下载速度 | 推荐度 |
 |---------|-------------|---------|--------|
-| 香港     | 20-50ms     | 10-50MB/s | ⭐⭐⭐⭐⭐ |
+| 亚太A区     | 20-50ms     | 10-50MB/s | ⭐⭐⭐⭐⭐ |
 | 新加坡   | 60-100ms    | 5-30MB/s  | ⭐⭐⭐⭐ |
 | 东京     | 80-120ms    | 5-20MB/s  | ⭐⭐⭐⭐ |
 | 美西     | 150-200ms   | 2-10MB/s  | ⭐⭐⭐ |
@@ -464,11 +464,11 @@ sudo certbot renew --dry-run
 
 ## 成本估算
 
-基于香港部署的月度成本参考:
+基于亚太A区部署的月度成本参考:
 
 | 服务 | 配置 | 月费用 | 备注 |
 |-----|------|--------|------|
-| VPS | 2C4G 100GB | $20-40 | 香港地区 |
+| VPS | 2C4G 100GB | $20-40 | 亚太A区地区 |
 | 流量 | 1TB/月 | $10-20 | 超出部分 |
 | 域名 | .com | $12/年 | |
 | SSL | Let's Encrypt | 免费 | |
@@ -477,9 +477,9 @@ sudo certbot renew --dry-run
 
 ## 总结
 
-要确保境外部署的 Docker Registry 代理能被中国大陆正常访问,关键在于:
+要确保远程部署的 Docker Registry 代理能被目标区域正常访问,关键在于:
 
-1. ✅ **选择合适的地理位置**(香港 > 新加坡 > 东京)
+1. ✅ **选择合适的地理位置**(亚太A区 > 新加坡 > 东京)
 2. ✅ **使用 CDN 加速**(Cloudflare 免费且有效)
 3. ✅ **优化网络配置**(BBR、连接池、HTTP/2)
 4. ✅ **智能DNS解析**(多地区服务器+就近访问)
