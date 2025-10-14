@@ -9,9 +9,11 @@ Error response from daemon: unknown: Missing x-amz-content-sha256
 
 ## 根本原因
 
-1. **Docker Hub 的存储架构**: Docker Hub 将 blob 数据存储在 AWS S3/CloudFront 上
-2. **重定向机制**: 当请求 blob 时,Docker Hub 返回 301/307 重定向到 S3 URL
-3. **原有问题**: 代理服务器尝试跟随重定向请求 S3,但没有 AWS 签名头,导致 400 错误
+1. **Docker Hub 的存储架构**: Docker Hub 将 blob 数据存储在 CDN 和云存储上
+2. **重定向机制**: 当请求 blob 时,Docker Hub 返回重定向到 CDN 或 S3 URL
+3. **原有问题**: 
+   - 代理尝试跟随 S3 重定向但缺少 AWS 签名头 → 400 错误
+   - Docker Hub CDN (`production.cloudflare.docker.com`) 在国内被墙 → 客户端无法访问
 
 ## 错误流程
 
@@ -28,15 +30,32 @@ Docker 客户端 → Proxy → Docker Hub
 
 ## 解决方案
 
-**不在服务器端跟随外部存储重定向,而是将重定向响应直接返回给客户端**
+**智能区分 Docker Hub CDN 和外部存储,采用不同的处理策略**
 
 ### 修复后的流程
 
+#### 场景 1: Docker Hub CDN (国内被墙)
 ```
 Docker 客户端 → Proxy → Docker Hub
-                         ↓ 301/307 重定向
+                         ↓ 307 重定向
+                    Location: production.cloudflare.docker.com
                          ↓
-                    Proxy 检测到外部存储 URL
+                    Proxy 检测到 Docker Hub CDN
+                         ↓
+                    Proxy 跟随重定向并下载
+                         ↓
+                    返回数据给客户端
+                         ↓ 200 OK
+                    下载成功 ✓
+```
+
+#### 场景 2: 外部存储 (AWS S3)
+```
+Docker 客户端 → Proxy → Docker Hub
+                         ↓ 301 重定向
+                    Location: amazonaws.com/...
+                         ↓
+                    Proxy 检测到外部存储
                          ↓
                     直接返回 301 给客户端
                          ↓
@@ -54,8 +73,15 @@ Docker 客户端 → AWS S3 (直接下载)
 - 307 Temporary Redirect
 - 308 Permanent Redirect
 
-### 2. 智能检测外部存储
-自动识别以下域名:
+### 2. 智能检测重定向目标
+自动识别不同类型的重定向:
+
+**Docker Hub CDN** (代理服务器跟随):
+- `*.cloudflare.docker.com` - Docker Hub CDN (国内被墙)
+- `*.docker.com` - Docker Hub 相关域名
+- `*.docker.io` - Docker Hub 注册表
+
+**外部存储** (返回给客户端):
 - `*.amazonaws.com` - AWS S3
 - `*.cloudfront.net` - AWS CloudFront
 - `*.storage.googleapis.com` - Google Cloud Storage
@@ -63,12 +89,14 @@ Docker 客户端 → AWS S3 (直接下载)
 
 ### 3. 区分处理策略
 
-| 重定向类型 | 域名示例 | 处理方式 |
-|----------|---------|---------|
-| Docker Hub 内部 | registry-1.docker.io | 服务器跟随 |
-| AWS S3 | production.cloudflare.docker.com | 返回给客户端 |
-| CloudFront | *.cloudfront.net | 返回给客户端 |
-| Google Cloud | *.storage.googleapis.com | 返回给客户端 |
+| 重定向类型 | 域名示例 | 处理方式 | 原因 |
+|----------|---------|---------|------|
+| Docker Hub CDN | production.cloudflare.docker.com | 服务器跟随 | 国内被墙,需代理 |
+| Docker Hub 相关 | *.docker.io, *.docker.com | 服务器跟随 | 可能被墙 |
+| AWS S3 | *.amazonaws.com | 返回给客户端 | 全球可达 |
+| CloudFront | *.cloudfront.net | 返回给客户端 | CDN全球可达 |
+| Google Cloud | *.storage.googleapis.com | 返回给客户端 | 全球可达 |
+| 其他重定向 | 未知域名 | 服务器跟随 | 安全策略 |
 
 ## 优势
 

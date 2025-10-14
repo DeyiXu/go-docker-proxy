@@ -382,7 +382,7 @@ func (p *ProxyServer) handleV2Request(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if p.config.Debug {
-		log.Printf("[DEBUG] /v2/* Request - Method: %s, Host: %s, Path: %s, Upstream: %s", 
+		log.Printf("[DEBUG] /v2/* Request - Method: %s, Host: %s, Path: %s, Upstream: %s",
 			r.Method, r.Host, r.URL.Path, upstream)
 	}
 
@@ -469,11 +469,25 @@ func (p *ProxyServer) proxyRequestWithRoundTrip(w http.ResponseWriter, r *http.R
 				log.Printf("[DEBUG] Proxy got redirect %d to: %s", resp.StatusCode, location)
 			}
 
-			// 检查是否是外部存储重定向 (如 AWS S3, GCS, Azure Blob 等)
+			// 检查重定向目标
 			redirectURL, err := url.Parse(location)
 			if err == nil {
-				// 如果重定向到外部存储 (amazonaws.com, storage.googleapis.com 等),
-				// 直接返回重定向响应给客户端
+				// Docker Hub CDN 重定向 - 需要代理服务器跟随(因为这些域名可能被墙)
+				isDockerHubCDN := strings.Contains(redirectURL.Host, "cloudflare.docker.com") ||
+					strings.Contains(redirectURL.Host, "docker.com") ||
+					strings.Contains(redirectURL.Host, "docker.io")
+
+				if isDockerHubCDN {
+					if p.config.Debug {
+						log.Printf("[DEBUG] Docker Hub CDN detected (%s), following redirect server-side", redirectURL.Host)
+					}
+					// 代理服务器跟随重定向
+					p.proxyRequestWithRoundTrip(w, r, redirectURL, enableCache)
+					return
+				}
+
+				// 真正的外部存储 (AWS S3, GCS, Azure Blob 等) - 返回给客户端
+				// 这些通常不会被墙,且有更好的全球可达性
 				isExternalStorage := strings.Contains(redirectURL.Host, "amazonaws.com") ||
 					strings.Contains(redirectURL.Host, "cloudfront.net") ||
 					strings.Contains(redirectURL.Host, "storage.googleapis.com") ||
@@ -483,21 +497,17 @@ func (p *ProxyServer) proxyRequestWithRoundTrip(w http.ResponseWriter, r *http.R
 					if p.config.Debug {
 						log.Printf("[DEBUG] External storage detected (%s), returning redirect to client", redirectURL.Host)
 					}
-					// 直接返回重定向响应
+					// 直接返回重定向响应给客户端
 					p.copyResponseRoundTrip(w, resp)
 					return
 				}
-			}
 
-			// 对于 Docker Hub 内部重定向,继续在服务器端处理
-			if strings.Contains(targetURL.Host, "registry-1.docker.io") {
-				if err == nil && strings.Contains(redirectURL.Host, "registry-1.docker.io") {
-					if p.config.Debug {
-						log.Printf("[DEBUG] Docker Hub internal redirect, following server-side")
-					}
-					p.proxyRequestWithRoundTrip(w, r, redirectURL, enableCache)
-					return
+				// 其他重定向,尝试跟随
+				if p.config.Debug {
+					log.Printf("[DEBUG] Following redirect to: %s", redirectURL.Host)
 				}
+				p.proxyRequestWithRoundTrip(w, r, redirectURL, enableCache)
+				return
 			}
 		}
 	}
