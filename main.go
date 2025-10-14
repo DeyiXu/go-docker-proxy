@@ -141,6 +141,7 @@ func (p *ProxyServer) Start() {
 
 	if p.config.Debug {
 		r.Use(middleware.RequestID)
+		log.Println("[DEBUG] Debug mode enabled")
 	}
 
 	// 健康检查端点
@@ -158,6 +159,7 @@ func (p *ProxyServer) Start() {
 	log.Printf("Starting proxy server on port %s", p.config.Port)
 	log.Printf("Custom domain: %s", p.config.CustomDomain)
 	log.Printf("Cache directory: %s", p.config.CacheDir)
+	log.Printf("Debug mode: %v", p.config.Debug)
 
 	// 打印路由配置
 	if p.config.Debug {
@@ -242,8 +244,15 @@ func (p *ProxyServer) handleRoot(w http.ResponseWriter, r *http.Request) {
 func (p *ProxyServer) handleV2Root(w http.ResponseWriter, r *http.Request) {
 	upstream := p.routeByHost(r.Host)
 	if upstream == "" {
+		if p.config.Debug {
+			log.Printf("[DEBUG] No upstream found for host: %s", r.Host)
+		}
 		p.writeRoutesResponse(w)
 		return
+	}
+
+	if p.config.Debug {
+		log.Printf("[DEBUG] /v2/ request - Host: %s, Upstream: %s", r.Host, upstream)
 	}
 
 	upstreamURL, _ := url.Parse(upstream + "/v2/")
@@ -252,13 +261,23 @@ func (p *ProxyServer) handleV2Root(w http.ResponseWriter, r *http.Request) {
 	// 检查是否需要认证
 	resp, err := p.transport.RoundTrip(req)
 	if err != nil {
+		if p.config.Debug {
+			log.Printf("[DEBUG] /v2/ RoundTrip error: %v", err)
+		}
 		p.writeErrorResponse(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer resp.Body.Close()
 
+	if p.config.Debug {
+		log.Printf("[DEBUG] /v2/ response status: %d", resp.StatusCode)
+	}
+
 	// 如果返回 401，返回认证挑战
 	if resp.StatusCode == http.StatusUnauthorized {
+		if p.config.Debug {
+			log.Printf("[DEBUG] /v2/ returning 401 auth challenge")
+		}
 		p.responseUnauthorized(w, r)
 		return
 	}
@@ -269,8 +288,16 @@ func (p *ProxyServer) handleV2Root(w http.ResponseWriter, r *http.Request) {
 func (p *ProxyServer) handleAuth(w http.ResponseWriter, r *http.Request) {
 	upstream := p.routeByHost(r.Host)
 	if upstream == "" {
+		if p.config.Debug {
+			log.Printf("[DEBUG] /v2/auth - No upstream found for host: %s", r.Host)
+		}
 		p.writeRoutesResponse(w)
 		return
+	}
+
+	scope := r.URL.Query().Get("scope")
+	if p.config.Debug {
+		log.Printf("[DEBUG] /v2/auth - Host: %s, Upstream: %s, Scope: %s", r.Host, upstream, scope)
 	}
 
 	upstreamURL, _ := url.Parse(upstream + "/v2/")
@@ -280,41 +307,66 @@ func (p *ProxyServer) handleAuth(w http.ResponseWriter, r *http.Request) {
 	// 使用 RoundTrip 直接调用
 	resp, err := p.transport.RoundTrip(req)
 	if err != nil {
+		if p.config.Debug {
+			log.Printf("[DEBUG] /v2/auth RoundTrip error: %v", err)
+		}
 		p.writeErrorResponse(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusUnauthorized {
+		if p.config.Debug {
+			log.Printf("[DEBUG] /v2/auth unexpected status: %d", resp.StatusCode)
+		}
 		p.copyResponseRoundTrip(w, resp)
 		return
 	}
 
 	authenticateStr := resp.Header.Get("WWW-Authenticate")
 	if authenticateStr == "" {
+		if p.config.Debug {
+			log.Printf("[DEBUG] /v2/auth missing WWW-Authenticate header")
+		}
 		p.copyResponseRoundTrip(w, resp)
 		return
 	}
 
+	if p.config.Debug {
+		log.Printf("[DEBUG] /v2/auth WWW-Authenticate: %s", authenticateStr)
+	}
+
 	wwwAuth, err := p.parseAuthenticate(authenticateStr)
 	if err != nil {
+		if p.config.Debug {
+			log.Printf("[DEBUG] /v2/auth parse error: %v", err)
+		}
 		p.writeErrorResponse(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	scope := r.URL.Query().Get("scope")
-
 	// 处理Docker Hub library镜像的scope
+	originalScope := scope
 	if strings.Contains(upstream, "registry-1.docker.io") && scope != "" {
 		scope = p.processDockerHubScope(scope)
+		if p.config.Debug && scope != originalScope {
+			log.Printf("[DEBUG] /v2/auth scope rewritten: %s -> %s", originalScope, scope)
+		}
 	}
 
 	token, err := p.fetchTokenWithRoundTrip(wwwAuth, scope, r.Header.Get("Authorization"))
 	if err != nil {
+		if p.config.Debug {
+			log.Printf("[DEBUG] /v2/auth token fetch error: %v", err)
+		}
 		p.writeErrorResponse(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer token.Body.Close()
+
+	if p.config.Debug {
+		log.Printf("[DEBUG] /v2/auth token fetched successfully, status: %d", token.StatusCode)
+	}
 
 	p.copyResponseRoundTrip(w, token)
 }
@@ -322,8 +374,16 @@ func (p *ProxyServer) handleAuth(w http.ResponseWriter, r *http.Request) {
 func (p *ProxyServer) handleV2Request(w http.ResponseWriter, r *http.Request) {
 	upstream := p.routeByHost(r.Host)
 	if upstream == "" {
+		if p.config.Debug {
+			log.Printf("[DEBUG] /v2/* No upstream found for host: %s, path: %s", r.Host, r.URL.Path)
+		}
 		p.writeRoutesResponse(w)
 		return
+	}
+
+	if p.config.Debug {
+		log.Printf("[DEBUG] /v2/* Request - Method: %s, Host: %s, Path: %s, Upstream: %s", 
+			r.Method, r.Host, r.URL.Path, upstream)
 	}
 
 	isDockerHub := strings.Contains(upstream, "registry-1.docker.io")
@@ -331,6 +391,9 @@ func (p *ProxyServer) handleV2Request(w http.ResponseWriter, r *http.Request) {
 	// 处理Docker Hub library镜像重定向
 	if isDockerHub {
 		if redirectURL := p.processDockerHubLibraryRedirect(r.URL.Path); redirectURL != "" {
+			if p.config.Debug {
+				log.Printf("[DEBUG] /v2/* Library redirect: %s -> %s", r.URL.Path, redirectURL)
+			}
 			http.Redirect(w, r, redirectURL, http.StatusMovedPermanently)
 			return
 		}
@@ -340,8 +403,14 @@ func (p *ProxyServer) handleV2Request(w http.ResponseWriter, r *http.Request) {
 	cacheKey := p.generateCacheKey(r.Host, r.URL.Path)
 	if p.isCacheable(r.URL.Path) {
 		if cachedItem, found := p.cache.Get(cacheKey); found {
+			if p.config.Debug {
+				log.Printf("[DEBUG] /v2/* Cache HIT: %s", r.URL.Path)
+			}
 			p.serveCachedResponse(w, cachedItem)
 			return
+		}
+		if p.config.Debug {
+			log.Printf("[DEBUG] /v2/* Cache MISS: %s", r.URL.Path)
 		}
 	}
 
@@ -354,19 +423,33 @@ func (p *ProxyServer) handleV2Request(w http.ResponseWriter, r *http.Request) {
 
 // 使用 RoundTrip 进行底层代理控制
 func (p *ProxyServer) proxyRequestWithRoundTrip(w http.ResponseWriter, r *http.Request, targetURL *url.URL, enableCache bool) {
+	if p.config.Debug {
+		log.Printf("[DEBUG] Proxy request to: %s", targetURL.String())
+	}
+
 	// 创建代理请求
 	req := p.createProxyRequest(r, targetURL)
 
 	// 使用 RoundTrip 直接执行请求
 	resp, err := p.transport.RoundTrip(req)
 	if err != nil {
+		if p.config.Debug {
+			log.Printf("[DEBUG] Proxy RoundTrip error: %v", err)
+		}
 		p.writeErrorResponse(w, fmt.Sprintf("transport error: %v", err), http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 
+	if p.config.Debug {
+		log.Printf("[DEBUG] Proxy response status: %d from %s", resp.StatusCode, targetURL.Host)
+	}
+
 	// 处理认证
 	if resp.StatusCode == http.StatusUnauthorized {
+		if p.config.Debug {
+			log.Printf("[DEBUG] Proxy got 401, returning auth challenge")
+		}
 		p.responseUnauthorized(w, r)
 		return
 	}
@@ -379,9 +462,13 @@ func (p *ProxyServer) proxyRequestWithRoundTrip(w http.ResponseWriter, r *http.R
 		resp.StatusCode == http.StatusSeeOther ||
 		resp.StatusCode == http.StatusTemporaryRedirect ||
 		resp.StatusCode == http.StatusPermanentRedirect {
-		
+
 		location := resp.Header.Get("Location")
 		if location != "" {
+			if p.config.Debug {
+				log.Printf("[DEBUG] Proxy got redirect %d to: %s", resp.StatusCode, location)
+			}
+
 			// 检查是否是外部存储重定向 (如 AWS S3, GCS, Azure Blob 等)
 			redirectURL, err := url.Parse(location)
 			if err == nil {
@@ -391,17 +478,23 @@ func (p *ProxyServer) proxyRequestWithRoundTrip(w http.ResponseWriter, r *http.R
 					strings.Contains(redirectURL.Host, "cloudfront.net") ||
 					strings.Contains(redirectURL.Host, "storage.googleapis.com") ||
 					strings.Contains(redirectURL.Host, "blob.core.windows.net")
-				
+
 				if isExternalStorage {
+					if p.config.Debug {
+						log.Printf("[DEBUG] External storage detected (%s), returning redirect to client", redirectURL.Host)
+					}
 					// 直接返回重定向响应
 					p.copyResponseRoundTrip(w, resp)
 					return
 				}
 			}
-			
+
 			// 对于 Docker Hub 内部重定向,继续在服务器端处理
 			if strings.Contains(targetURL.Host, "registry-1.docker.io") {
 				if err == nil && strings.Contains(redirectURL.Host, "registry-1.docker.io") {
+					if p.config.Debug {
+						log.Printf("[DEBUG] Docker Hub internal redirect, following server-side")
+					}
 					p.proxyRequestWithRoundTrip(w, r, redirectURL, enableCache)
 					return
 				}
@@ -451,18 +544,24 @@ func (p *ProxyServer) fetchTokenWithRoundTrip(wwwAuth map[string]string, scope, 
 }
 
 func (p *ProxyServer) routeByHost(host string) string {
+	originalHost := host
 	// 移除端口号
 	if idx := strings.Index(host, ":"); idx != -1 {
 		host = host[:idx]
 	}
 
 	if upstream, exists := p.config.Routes[host]; exists {
+		if p.config.Debug {
+			log.Printf("[DEBUG] Route matched: %s -> %s", originalHost, upstream)
+		}
 		return upstream
 	}
 
 	// 调试模式下的默认上游
 	if p.config.Debug {
+		log.Printf("[DEBUG] No route found for host: %s", originalHost)
 		if targetUpstream := getEnv("TARGET_UPSTREAM", ""); targetUpstream != "" {
+			log.Printf("[DEBUG] 使用 TARGET_UPSTREAM: %s", targetUpstream)
 			return targetUpstream
 		}
 	}
@@ -473,8 +572,11 @@ func (p *ProxyServer) routeByHost(host string) string {
 func (p *ProxyServer) processDockerHubLibraryRedirect(path string) string {
 	parts := strings.Split(path, "/")
 	if len(parts) == 5 && parts[1] == "v2" {
-		parts = append(parts[:2], append([]string{"library"}, parts[2:]...)...)
-		return strings.Join(parts, "/")
+		newPath := strings.Join(append(parts[:2], append([]string{"library"}, parts[2:]...)...), "/")
+		if p.config.Debug {
+			log.Printf("[DEBUG] Docker Hub library redirect: %s -> %s", path, newPath)
+		}
+		return newPath
 	}
 	return ""
 }
@@ -482,8 +584,11 @@ func (p *ProxyServer) processDockerHubLibraryRedirect(path string) string {
 func (p *ProxyServer) processDockerHubScope(scope string) string {
 	parts := strings.Split(scope, ":")
 	if len(parts) == 3 && !strings.Contains(parts[1], "/") {
-		parts[1] = "library/" + parts[1]
-		return strings.Join(parts, ":")
+		newScope := strings.Join([]string{parts[0], "library/" + parts[1], parts[2]}, ":")
+		if p.config.Debug {
+			log.Printf("[DEBUG] Docker Hub scope rewrite: %s -> %s", scope, newScope)
+		}
+		return newScope
 	}
 	return scope
 }
