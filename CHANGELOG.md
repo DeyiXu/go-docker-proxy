@@ -1,5 +1,27 @@
 # 更新日志
 
+## [v1.1.0] - 2024-12-XX
+
+### 🔧 修复
+- **AWS S3 重定向处理** - 修复 Docker Hub 到 AWS S3 的 blob 下载失败问题
+  - 问题: 当 Docker Hub 返回 301 重定向到 AWS S3 时,代理尝试跟随重定向但缺少 AWS 签名头
+  - 错误: `Missing x-amz-content-sha256`
+  - 解决方案: 对于外部存储 (AWS S3, Google Cloud Storage, Azure Blob 等) 的重定向,直接返回给客户端,让客户端直接从源下载
+  - 影响: 
+    - ✅ 支持所有标准重定向状态码 (301, 302, 303, 307, 308)
+    - ✅ 自动检测外部存储域名 (amazonaws.com, cloudfront.net, storage.googleapis.com, blob.core.windows.net)
+    - ✅ Docker Hub 内部重定向仍在服务器端处理以利用缓存
+    - ✅ 避免了复杂的 AWS Signature V4 签名处理
+  - 测试: 新增 `test-aws-redirect.sh` 测试脚本
+
+### 🧪 测试
+- 新增 `test-aws-redirect.sh` - AWS S3 重定向测试脚本
+  - Manifest 请求测试
+  - Blob 重定向验证
+  - 完整镜像拉取测试
+
+## [v1.0.0] - 2024-12-XX
+
 ## 基于 ciiiii/cloudflare-docker-proxy 的改进
 
 ### 主要变更

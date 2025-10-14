@@ -14,18 +14,24 @@ go-docker-proxy/
 │   └── .env.example               # 环境变量示例
 │
 ├── 🛠️ 部署脚本
-│   ├── deploy-overseas.sh         # 一键部署脚本(远程服务器)
+│   ├── deploy.sh                  # 一键部署脚本(自动化部署)
 │   ├── monitor.sh                 # 服务监控脚本
-│   └── test.sh                    # 功能测试脚本
+│   ├── test.sh                    # 功能测试脚本
+│   └── test-aws-redirect.sh       # AWS S3重定向测试脚本
 │
 ├── 📚 文档系统
 │   ├── README.md                  # 项目主文档
-│   ├── QUICKSTART.md              # 快速开始指南(10分钟部署)
-│   ├── DEPLOYMENT_CN.md           # 远程部署完整指南
+│   ├── QUICK_START.md             # 快速开始指南(10分钟部署)
+│   ├── DEPLOYMENT_GUIDE.md        # 完整部署指南
 │   ├── NETWORK_OPTIMIZATION.md    # 网络优化配置详解
 │   ├── OPTIMIZATION_SUMMARY.md    # 优化总结
 │   ├── ARCHITECTURE.md            # 系统架构文档
-│   └── CHANGELOG.md               # 版本变更日志
+│   ├── CHANGELOG.md               # 版本变更日志
+│   ├── AWS_REDIRECT_FIX.md        # AWS S3重定向问题修复说明
+│   ├── COMPLIANCE.md              # 合规性说明
+│   ├── REFERENCE_CARD.md          # 快速参考卡片
+│   ├── COMPLETION_REPORT.md       # 项目完成报告
+│   └── PROJECT_STRUCTURE.md       # 本文档(项目结构说明)
 │
 ├── 🗂️ 其他文件
 │   ├── LICENSE                    # 开源协议

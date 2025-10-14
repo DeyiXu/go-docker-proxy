@@ -29,6 +29,7 @@
 - **[架构文档](./ARCHITECTURE.md)** - 系统架构和设计原理
 - **[优化方案总结](./OPTIMIZATION_SUMMARY.md)** - 性能优化总结
 - **[变更日志](./CHANGELOG.md)** - 版本更新记录
+- **[AWS S3 重定向修复](./AWS_REDIRECT_FIX.md)** - AWS S3 blob 下载问题修复说明
 
 ### 合规性
 - **[合规性说明](./COMPLIANCE.md)** - 文档合规性和技术中立原则

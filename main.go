@@ -371,17 +371,41 @@ func (p *ProxyServer) proxyRequestWithRoundTrip(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// 处理 Docker Hub 重定向 (状态码 307)
-	if strings.Contains(targetURL.Host, "registry-1.docker.io") && resp.StatusCode == http.StatusTemporaryRedirect {
+	// 处理重定向 (301, 302, 303, 307, 308)
+	// 对于 AWS S3 等外部存储的重定向,直接返回给客户端让其直接下载
+	// 这样避免代理服务器处理 AWS 签名等复杂问题
+	if resp.StatusCode == http.StatusMovedPermanently ||
+		resp.StatusCode == http.StatusFound ||
+		resp.StatusCode == http.StatusSeeOther ||
+		resp.StatusCode == http.StatusTemporaryRedirect ||
+		resp.StatusCode == http.StatusPermanentRedirect {
+		
 		location := resp.Header.Get("Location")
 		if location != "" {
+			// 检查是否是外部存储重定向 (如 AWS S3, GCS, Azure Blob 等)
 			redirectURL, err := url.Parse(location)
-			if err != nil {
-				p.writeErrorResponse(w, fmt.Sprintf("invalid redirect URL: %v", err), http.StatusBadGateway)
-				return
+			if err == nil {
+				// 如果重定向到外部存储 (amazonaws.com, storage.googleapis.com 等),
+				// 直接返回重定向响应给客户端
+				isExternalStorage := strings.Contains(redirectURL.Host, "amazonaws.com") ||
+					strings.Contains(redirectURL.Host, "cloudfront.net") ||
+					strings.Contains(redirectURL.Host, "storage.googleapis.com") ||
+					strings.Contains(redirectURL.Host, "blob.core.windows.net")
+				
+				if isExternalStorage {
+					// 直接返回重定向响应
+					p.copyResponseRoundTrip(w, resp)
+					return
+				}
 			}
-			p.proxyRequestWithRoundTrip(w, r, redirectURL, enableCache)
-			return
+			
+			// 对于 Docker Hub 内部重定向,继续在服务器端处理
+			if strings.Contains(targetURL.Host, "registry-1.docker.io") {
+				if err == nil && strings.Contains(redirectURL.Host, "registry-1.docker.io") {
+					p.proxyRequestWithRoundTrip(w, r, redirectURL, enableCache)
+					return
+				}
+			}
 		}
 	}
 

@@ -156,29 +156,89 @@ copyResponseRoundTrip(w, resp)
 - 精确的头部控制
 - 更好的性能
 
-### 5. Docker Hub 重定向处理
+### 5. 重定向处理策略
 
-Docker Hub 对 blob 请求返回 307 重定向到 S3/CloudFront:
+Docker Registry 的 blob 存储通常使用外部对象存储（AWS S3, Google Cloud Storage 等），返回重定向响应让客户端直接下载。
+
+#### 重定向类型
+
+1. **内部重定向** (服务器端处理)
+   - Docker Hub registry-1.docker.io 内的重定向
+   - 示例: `/v2/nginx/...` → `/v2/library/nginx/...`
+   - 处理: 代理服务器跟随重定向,继续请求
+
+2. **外部存储重定向** (客户端处理)
+   - 重定向到 AWS S3, CloudFront, Google Cloud Storage 等
+   - 示例: registry-1.docker.io → production.cloudflare.docker.com
+   - 处理: 直接返回重定向响应给客户端
+
+#### 重定向流程
 
 ```
-客户端 → Proxy → Docker Hub (307)
+客户端 → Proxy → Docker Hub
                     ↓
-                Location: https://cloudfront.net/...
-                    ↓
-         Proxy → CloudFront (200)
-                    ↓
-         返回给客户端
+    ┌───────────────┴─────────────────┐
+    │                                 │
+内部重定向 (307/301)              外部存储重定向 (301/307)
+registry-1.docker.io            amazonaws.com / cloudfront.net
+    │                                 │
+    ↓                                 ↓
+Proxy 继续请求                  返回重定向给客户端
+    │                                 │
+    ↓                                 ↓
+返回最终结果              客户端直接从 S3 下载
 ```
 
-**实现**:
+#### 实现细节
+
 ```go
-if isDockerHub && resp.StatusCode == http.StatusTemporaryRedirect {
+// 支持所有标准重定向状态码
+if resp.StatusCode == http.StatusMovedPermanently ||      // 301
+   resp.StatusCode == http.StatusFound ||                 // 302
+   resp.StatusCode == http.StatusSeeOther ||              // 303
+   resp.StatusCode == http.StatusTemporaryRedirect ||     // 307
+   resp.StatusCode == http.StatusPermanentRedirect {      // 308
+    
     location := resp.Header.Get("Location")
     redirectURL, _ := url.Parse(location)
-    // 递归代理到重定向地址
-    proxyRequestWithRoundTrip(w, r, redirectURL, enableCache)
+    
+    // 检测外部存储域名
+    isExternalStorage := strings.Contains(redirectURL.Host, "amazonaws.com") ||
+                        strings.Contains(redirectURL.Host, "cloudfront.net") ||
+                        strings.Contains(redirectURL.Host, "storage.googleapis.com") ||
+                        strings.Contains(redirectURL.Host, "blob.core.windows.net")
+    
+    if isExternalStorage {
+        // 直接返回重定向响应给客户端
+        copyResponseRoundTrip(w, resp)
+    } else if isDockerHubInternal(redirectURL) {
+        // Docker Hub 内部重定向,服务器端处理
+        proxyRequestWithRoundTrip(w, r, redirectURL, enableCache)
+    }
 }
 ```
+
+#### 为什么不代理外部存储?
+
+1. **AWS 签名复杂性**
+   - AWS S3 需要 AWS Signature V4
+   - 需要 `x-amz-content-sha256` 等特定头
+   - 实现复杂且易出错
+
+2. **性能优势**
+   - 客户端直接从 CDN/S3 下载
+   - 避免代理服务器带宽瓶颈
+   - 减少延迟
+
+3. **缓存策略**
+   - S3 URL 包含签名,不适合长期缓存
+   - 预签名 URL 有时效性
+   - 直接下载更可靠
+
+4. **标准行为**
+   - 符合 Docker Registry V2 API 规范
+   - Docker 客户端原生支持重定向
+   - 与官方 registry 行为一致
 
 ## 与 Cloudflare Worker 版本的差异
 
