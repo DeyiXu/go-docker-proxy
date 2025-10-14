@@ -2,6 +2,47 @@
 
 基于Go语言实现的Docker镜像代理服务，完全兼容 [ciiiii/cloudflare-docker-proxy](https://github.com/ciiiii/cloudflare-docker-proxy) 的路由规则和功能。
 
+## 项目背景
+
+在使用 [ciiiii/cloudflare-docker-proxy](https://github.com/ciiiii/cloudflare-docker-proxy) 时，我们遇到了一些实际问题：
+
+### 为什么开发这个项目？
+
+**Cloudflare Workers 的限制：**
+
+`ciiiii/cloudflare-docker-proxy` 是一个优秀的解决方案，它利用 Cloudflare Workers 的边缘节点提供 Docker 镜像代理服务。但在实际使用中，由于 Cloudflare Workers 的免费套餐限制和共享基础设施特性，当使用人数较多时，会触发以下限制：
+
+1. **请求速率限制** - Workers 的请求频率限制
+2. **上游速率限制** - Docker Hub 对未认证请求的速率限制
+3. **共享配额耗尽** - 多用户共享同一个 Worker 实例
+
+### 典型错误场景
+
+```
+INFO[0000] Retrieving image manifest registry.example.com/nilorg/alpine:latest 
+INFO[0000] Retrieving image registry.example.com/nilorg/alpine:latest from registry registry.example.com 
+error building image: unable to complete operation after 0 attempts, last error: 
+GET https://registry.example.com/v2/nilorg/alpine/manifests/latest: 
+TOOMANYREQUESTS: You have reached your unauthenticated pull rate limit. 
+https://www.docker.com/increase-rate-limit
+```
+
+**问题分析：**
+- ❌ Cloudflare Workers 边缘节点被 Docker Hub 识别为同一来源
+- ❌ 多用户共享配额，极易触发 Docker Hub 的速率限制（未认证：100次/6小时）
+- ❌ 无法有效控制缓存和请求分发策略
+
+### Go Docker Proxy 的优势
+
+本项目在保持 100% 兼容的同时，解决了上述问题：
+
+- ✅ **独立部署** - 每个实例拥有独立的 IP 和配额
+- ✅ **智能缓存** - 本地文件缓存大幅减少上游请求
+- ✅ **灵活认证** - 支持配置 Docker Hub 认证凭据
+- ✅ **完全控制** - 可根据需求调整请求策略和缓存规则
+- ✅ **无使用限制** - 不受 Cloudflare Workers 配额约束
+- ✅ **跨区域优化** - 支持全球任意位置部署，优化网络路径
+
 ## 特性
 
 - 🚀 **完全兼容** [ciiiii/cloudflare-docker-proxy](https://github.com/ciiiii/cloudflare-docker-proxy) 的路由配置
