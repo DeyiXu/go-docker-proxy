@@ -49,6 +49,21 @@ Docker 客户端 → Proxy → Docker Hub
                     下载成功 ✓
 ```
 
+#### 场景 2: Cloudflare R2 存储 (AWS 签名请求)
+```
+Docker 客户端 → Proxy → Docker Hub
+                         ↓ 307 重定向
+                    Location: docker-images-prod.*.r2.cloudflarestorage.com
+                         ↓
+                    Proxy 检测到 Cloudflare R2 存储
+                         ↓
+                    返回 307 重定向给客户端
+                         ↓
+                    客户端直接访问 R2 (带签名URL)
+                         ↓ 200 OK
+                    下载成功 ✓
+```
+
 #### 场景 2: 外部存储 (AWS S3)
 ```
 Docker 客户端 → Proxy → Docker Hub
@@ -84,6 +99,7 @@ Docker 客户端 → AWS S3 (直接下载)
 **外部存储** (返回给客户端):
 - `*.amazonaws.com` - AWS S3
 - `*.cloudfront.net` - AWS CloudFront
+- `*.cloudflarestorage.com` - Cloudflare R2 (需要 AWS 签名)
 - `*.storage.googleapis.com` - Google Cloud Storage
 - `*.blob.core.windows.net` - Azure Blob Storage
 
@@ -93,6 +109,7 @@ Docker 客户端 → AWS S3 (直接下载)
 |----------|---------|---------|------|
 | Docker Hub CDN | production.cloudflare.docker.com | 服务器跟随 | 国内被墙,需代理 |
 | Docker Hub 相关 | *.docker.io, *.docker.com | 服务器跟随 | 可能被墙 |
+| Cloudflare R2 | *.r2.cloudflarestorage.com | 返回客户端 | 需要 AWS 签名 |
 | AWS S3 | *.amazonaws.com | 返回给客户端 | 全球可达 |
 | CloudFront | *.cloudfront.net | 返回给客户端 | CDN全球可达 |
 | Google Cloud | *.storage.googleapis.com | 返回给客户端 | 全球可达 |

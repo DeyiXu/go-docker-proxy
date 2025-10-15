@@ -5,17 +5,19 @@
 ### 🔧 修复
 - **重定向处理优化** - 修复 Docker Hub blob 下载失败和国内访问问题
   - 问题: 
-    - 当 Docker Hub 返回重定向到 AWS S3 时,代理缺少 AWS 签名头 (`Missing x-amz-content-sha256`)
+    - 当 Docker Hub 返回重定向到 AWS S3/Cloudflare R2 时,代理缺少 AWS 签名头 (`Missing x-amz-content-sha256`)
     - Docker Hub CDN (`production.cloudflare.docker.com`) 在国内被墙,客户端无法直接访问
+    - Cloudflare R2 存储需要 AWS 签名请求,代理跟随会破坏签名
   - 解决方案: 
     - **Docker Hub CDN** (`*.cloudflare.docker.com`, `*.docker.com`, `*.docker.io`): 代理服务器跟随重定向并代理下载
-    - **外部存储** (AWS S3, GCS, Azure Blob): 直接返回重定向给客户端
+    - **外部存储** (AWS S3, Cloudflare R2, GCS, Azure Blob): 直接返回重定向给客户端
     - **其他重定向**: 代理服务器尝试跟随
   - 影响: 
     - ✅ 支持所有标准重定向状态码 (301, 302, 303, 307, 308)
     - ✅ 智能识别 Docker Hub CDN 并代理下载 (解决国内访问问题)
-    - ✅ 自动检测外部存储域名 (amazonaws.com, cloudfront.net, storage.googleapis.com, blob.core.windows.net)
+    - ✅ 自动检测外部存储域名 (amazonaws.com, cloudfront.net, cloudflarestorage.com, storage.googleapis.com, blob.core.windows.net)
     - ✅ 避免了复杂的 AWS Signature V4 签名处理
+    - ✅ 支持 Cloudflare R2 存储 (docker-images-prod.*.r2.cloudflarestorage.com)
   - 测试: 新增 `test-aws-redirect.sh` 测试脚本
 
 ### 🧪 测试

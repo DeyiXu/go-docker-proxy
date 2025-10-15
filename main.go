@@ -486,10 +486,12 @@ func (p *ProxyServer) proxyRequestWithRoundTrip(w http.ResponseWriter, r *http.R
 					return
 				}
 
-				// 真正的外部存储 (AWS S3, GCS, Azure Blob 等) - 返回给客户端
+				// 真正的外部存储 (AWS S3, Cloudflare R2, GCS, Azure Blob 等) - 返回给客户端
 				// 这些通常不会被墙,且有更好的全球可达性
+				// 同时它们需要特殊的签名请求,代理跟随会破坏签名
 				isExternalStorage := strings.Contains(redirectURL.Host, "amazonaws.com") ||
 					strings.Contains(redirectURL.Host, "cloudfront.net") ||
+					strings.Contains(redirectURL.Host, "cloudflarestorage.com") || // Cloudflare R2
 					strings.Contains(redirectURL.Host, "storage.googleapis.com") ||
 					strings.Contains(redirectURL.Host, "blob.core.windows.net")
 
