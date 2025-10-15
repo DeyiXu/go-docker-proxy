@@ -23,11 +23,12 @@ import (
 )
 
 type Config struct {
-	Port         string
-	CacheDir     string
-	Debug        bool
-	CustomDomain string
-	Routes       map[string]string
+	Port                string
+	CacheDir            string
+	Debug               bool
+	CustomDomain        string
+	Routes              map[string]string
+	BlockedHostPatterns []string // 黑名单域名模式
 }
 
 type ProxyServer struct {
@@ -70,12 +71,34 @@ func main() {
 func NewProxyServer() *ProxyServer {
 	customDomain := getEnv("CUSTOM_DOMAIN", "example.com")
 
+	// 内置黑名单：这些域名被墙，需要服务器端处理重定向
+	// 注意：只包含被墙的域名，不包含可以正常访问的外部存储
+	defaultBlockedHostPatterns := []string{
+		"cloudflare.docker.com",
+		"docker.com",
+		"docker.io",
+	}
+
+	// 从环境变量加载额外的黑名单
+	blockedHostPatterns := make([]string, len(defaultBlockedHostPatterns))
+	copy(blockedHostPatterns, defaultBlockedHostPatterns)
+	if externalBlocked := getEnv("BLOCKED_HOSTS", ""); externalBlocked != "" {
+		externalPatterns := strings.Split(externalBlocked, ",")
+		for _, pattern := range externalPatterns {
+			pattern = strings.TrimSpace(pattern)
+			if pattern != "" {
+				blockedHostPatterns = append(blockedHostPatterns, pattern)
+			}
+		}
+	}
+
 	config := &Config{
-		Port:         getEnv("PORT", "8080"),
-		CacheDir:     getEnv("CACHE_DIR", "./cache"),
-		Debug:        getEnv("DEBUG", "false") == "true",
-		CustomDomain: customDomain,
-		Routes:       buildRoutes(customDomain),
+		Port:                getEnv("PORT", "8080"),
+		CacheDir:            getEnv("CACHE_DIR", "./cache"),
+		Debug:               getEnv("DEBUG", "false") == "true",
+		CustomDomain:        customDomain,
+		Routes:              buildRoutes(customDomain),
+		BlockedHostPatterns: blockedHostPatterns,
 	}
 
 	cache := NewFileCache(config.CacheDir)
@@ -472,43 +495,26 @@ func (p *ProxyServer) proxyRequestWithRoundTrip(w http.ResponseWriter, r *http.R
 			// 检查重定向目标
 			redirectURL, err := url.Parse(location)
 			if err == nil {
-				// Docker Hub CDN 重定向 - 需要代理服务器跟随(因为这些域名可能被墙)
-				isDockerHubCDN := strings.Contains(redirectURL.Host, "cloudflare.docker.com") ||
-					strings.Contains(redirectURL.Host, "docker.com") ||
-					strings.Contains(redirectURL.Host, "docker.io")
-
-				if isDockerHubCDN {
+				// 使用黑名单机制决定如何处理重定向
+				if p.isBlockedHost(redirectURL.Host) {
+					// 黑名单中的域名:服务器端处理重定向
+					// 原因: 这些域名被墙，客户端无法直接访问
 					if p.config.Debug {
-						log.Printf("[DEBUG] Docker Hub CDN detected (%s), following redirect server-side", redirectURL.Host)
+						log.Printf("[DEBUG] Blocked host detected (%s), following redirect server-side", redirectURL.Host)
 					}
-					// 代理服务器跟随重定向
-					p.proxyRequestWithRoundTrip(w, r, redirectURL, enableCache)
+					// 使用 GET 方法跟随重定向,不带原始请求体和认证头
+					// 这样可以保持签名 URL 的完整性 (对于外部存储的签名 URL)
+					p.followRedirectWithSignedURL(w, redirectURL)
 					return
 				}
 
-				// 真正的外部存储 (AWS S3, Cloudflare R2, GCS, Azure Blob 等) - 返回给客户端
-				// 这些通常不会被墙,且有更好的全球可达性
-				// 同时它们需要特殊的签名请求,代理跟随会破坏签名
-				isExternalStorage := strings.Contains(redirectURL.Host, "amazonaws.com") ||
-					strings.Contains(redirectURL.Host, "cloudfront.net") ||
-					strings.Contains(redirectURL.Host, "cloudflarestorage.com") || // Cloudflare R2
-					strings.Contains(redirectURL.Host, "storage.googleapis.com") ||
-					strings.Contains(redirectURL.Host, "blob.core.windows.net")
-
-				if isExternalStorage {
-					if p.config.Debug {
-						log.Printf("[DEBUG] External storage detected (%s), returning redirect to client", redirectURL.Host)
-					}
-					// 直接返回重定向响应给客户端
-					p.copyResponseRoundTrip(w, resp)
-					return
-				}
-
-				// 其他重定向,尝试跟随
+				// 非黑名单域名:直接返回重定向响应给客户端
+				// 这些域名可以正常访问 (如 AWS S3, Cloudflare R2, GCS, Azure Blob 等)
+				// 让客户端自己处理重定向,减少代理服务器负担和流量
 				if p.config.Debug {
-					log.Printf("[DEBUG] Following redirect to: %s", redirectURL.Host)
+					log.Printf("[DEBUG] Non-blocked host (%s), returning redirect to client", redirectURL.Host)
 				}
-				p.proxyRequestWithRoundTrip(w, r, redirectURL, enableCache)
+				p.copyResponseRoundTrip(w, resp)
 				return
 			}
 		}
@@ -522,6 +528,66 @@ func (p *ProxyServer) proxyRequestWithRoundTrip(w http.ResponseWriter, r *http.R
 	} else {
 		p.copyResponseWithCacheRoundTrip(w, resp, "", false)
 	}
+}
+
+// 检查域名是否在黑名单中
+func (p *ProxyServer) isBlockedHost(host string) bool {
+	for _, pattern := range p.config.BlockedHostPatterns {
+		if strings.Contains(host, pattern) {
+			if p.config.Debug {
+				log.Printf("[DEBUG] Host %s matched blocked pattern: %s", host, pattern)
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// 跟随签名 URL 重定向 (用于 AWS S3/Cloudflare R2 等外部存储)
+func (p *ProxyServer) followRedirectWithSignedURL(w http.ResponseWriter, signedURL *url.URL) {
+	if p.config.Debug {
+		log.Printf("[DEBUG] Following signed URL: %s", signedURL.String())
+	}
+
+	// 创建新的 GET 请求,不带原始请求的认证信息
+	req, err := http.NewRequest("GET", signedURL.String(), nil)
+	if err != nil {
+		if p.config.Debug {
+			log.Printf("[DEBUG] Failed to create signed URL request: %v", err)
+		}
+		p.writeErrorResponse(w, fmt.Sprintf("invalid signed URL: %v", err), http.StatusBadGateway)
+		return
+	}
+
+	// 只设置必要的请求头
+	req.Header.Set("User-Agent", "go-docker-proxy/1.0")
+	// 不设置 Authorization 等认证头,因为签名 URL 本身包含认证信息
+
+	// 使用 RoundTrip 执行请求
+	resp, err := p.transport.RoundTrip(req)
+	if err != nil {
+		if p.config.Debug {
+			log.Printf("[DEBUG] Signed URL request error: %v", err)
+		}
+		p.writeErrorResponse(w, fmt.Sprintf("signed URL request failed: %v", err), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	if p.config.Debug {
+		log.Printf("[DEBUG] Signed URL response status: %d", resp.StatusCode)
+	}
+
+	// 如果返回 400/403,说明签名问题,记录详细错误
+	if resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusForbidden {
+		if p.config.Debug {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			log.Printf("[DEBUG] Signed URL error response: %s", string(bodyBytes))
+		}
+	}
+
+	// 直接返回响应,不缓存签名 URL 的结果(因为 URL 有时效性)
+	p.copyResponseRoundTrip(w, resp)
 }
 
 // 使用 RoundTrip 获取 token
