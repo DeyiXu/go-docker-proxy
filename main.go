@@ -25,6 +25,7 @@ import (
 type Config struct {
 	Port                string
 	CacheDir            string
+	CacheEnabled        bool // 缓存开关
 	Debug               bool
 	CustomDomain        string
 	Routes              map[string]string
@@ -95,6 +96,7 @@ func NewProxyServer() *ProxyServer {
 	config := &Config{
 		Port:                getEnv("PORT", "8080"),
 		CacheDir:            getEnv("CACHE_DIR", "./cache"),
+		CacheEnabled:        getEnv("CACHE_ENABLED", "true") == "true", // 默认启用缓存
 		Debug:               getEnv("DEBUG", "false") == "true",
 		CustomDomain:        customDomain,
 		Routes:              buildRoutes(customDomain),
@@ -182,6 +184,7 @@ func (p *ProxyServer) Start() {
 	log.Printf("Starting proxy server on port %s", p.config.Port)
 	log.Printf("Custom domain: %s", p.config.CustomDomain)
 	log.Printf("Cache directory: %s", p.config.CacheDir)
+	log.Printf("Cache enabled: %v", p.config.CacheEnabled)
 	log.Printf("Debug mode: %v", p.config.Debug)
 
 	// 打印路由配置
@@ -422,18 +425,20 @@ func (p *ProxyServer) handleV2Request(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 检查缓存
-	cacheKey := p.generateCacheKey(r.Host, r.URL.Path)
-	if p.isCacheable(r.URL.Path) {
-		if cachedItem, found := p.cache.Get(cacheKey); found {
-			if p.config.Debug {
-				log.Printf("[DEBUG] /v2/* Cache HIT: %s", r.URL.Path)
+	// 检查缓存（如果启用）
+	if p.config.CacheEnabled {
+		cacheKey := p.generateCacheKey(r.Host, r.URL.Path)
+		if p.isCacheable(r.URL.Path) {
+			if cachedItem, found := p.cache.Get(cacheKey); found {
+				if p.config.Debug {
+					log.Printf("[DEBUG] /v2/* Cache HIT: %s", r.URL.Path)
+				}
+				p.serveCachedResponse(w, cachedItem)
+				return
 			}
-			p.serveCachedResponse(w, cachedItem)
-			return
-		}
-		if p.config.Debug {
-			log.Printf("[DEBUG] /v2/* Cache MISS: %s", r.URL.Path)
+			if p.config.Debug {
+				log.Printf("[DEBUG] /v2/* Cache MISS: %s", r.URL.Path)
+			}
 		}
 	}
 
@@ -520,7 +525,7 @@ func (p *ProxyServer) proxyRequestWithRoundTrip(w http.ResponseWriter, r *http.R
 		}
 	}
 
-	shouldCache := enableCache && p.isCacheable(r.URL.Path)
+	shouldCache := p.config.CacheEnabled && enableCache && p.isCacheable(r.URL.Path)
 
 	if shouldCache {
 		cacheKey := p.generateCacheKey(r.Host, r.URL.Path)
@@ -840,6 +845,15 @@ func (p *ProxyServer) copyResponseWithCacheRoundTrip(w http.ResponseWriter, resp
 			_, _ = w.Write(bodyBytes)
 		}
 		fmt.Printf("proxy cache read error: %v\n", err)
+		return
+	}
+
+	// 验证响应内容：只缓存有效的响应（Content-Length > 0）
+	if len(bodyBytes) == 0 {
+		if p.config.Debug {
+			log.Printf("[DEBUG] Skipping cache for empty response: %s", cacheKey)
+		}
+		w.WriteHeader(resp.StatusCode)
 		return
 	}
 

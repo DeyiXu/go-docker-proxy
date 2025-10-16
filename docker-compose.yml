@@ -4,10 +4,20 @@ services:
     ports:
       - "8080:8080"
     environment:
+      # 基础配置
       - PORT=8080
-      - CACHE_DIR=/cache
-      - DEBUG=true
       - CUSTOM_DOMAIN=example.com
+      
+      # 缓存配置
+      - CACHE_DIR=/cache
+      - CACHE_ENABLED=true  # true=启用缓存, false=禁用缓存
+      
+      # 黑名单配置 (访问受限的域名，逗号分隔)
+      # 示例: BLOCKED_HOSTS=example.com,another.com
+      - BLOCKED_HOSTS=
+      
+      # 调试和开发
+      - DEBUG=true
       - TARGET_UPSTREAM=https://registry-1.docker.io
     volumes:
       - cache_data:/cache
