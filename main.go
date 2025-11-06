@@ -564,6 +564,10 @@ func (p *ProxyServer) followRedirectWithSignedURL(w http.ResponseWriter, signedU
 		return
 	}
 
+	// 设置正确的 Host 头部，确保 TLS SNI 正确
+	req.Host = signedURL.Host
+	req.Header.Set("Host", signedURL.Host)
+
 	// 只设置必要的请求头
 	req.Header.Set("User-Agent", "go-docker-proxy/1.0")
 	// 不设置 Authorization 等认证头,因为签名 URL 本身包含认证信息
