@@ -113,6 +113,8 @@ func NewProxyServer() *ProxyServer {
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second, // 添加响应头超时
+		DisableKeepAlives:     false,            // 启用 Keep-Alive
 
 		// TLS 配置
 		TLSClientConfig: &tls.Config{
@@ -284,13 +286,43 @@ func (p *ProxyServer) handleV2Root(w http.ResponseWriter, r *http.Request) {
 	upstreamURL, _ := url.Parse(upstream + "/v2/")
 	req := p.createProxyRequest(r, upstreamURL)
 
-	// 检查是否需要认证
-	resp, err := p.transport.RoundTrip(req)
+	// 检查是否需要认证，添加重试机制
+	var resp *http.Response
+	var err error
+	maxRetries := 3
+	for i := 0; i < maxRetries; i++ {
+		if i > 0 {
+			if p.config.Debug {
+				log.Printf("[DEBUG] /v2/ retry attempt %d/%d", i+1, maxRetries)
+			}
+			time.Sleep(time.Duration(i) * 100 * time.Millisecond) // 递增延迟
+			// 重新创建请求（因为 Body 可能已被读取）
+			req = p.createProxyRequest(r, upstreamURL)
+		}
+
+		resp, err = p.transport.RoundTrip(req)
+		if err == nil {
+			break // 成功，退出重试
+		}
+
+		if p.config.Debug {
+			log.Printf("[DEBUG] /v2/ RoundTrip error (attempt %d): %v", i+1, err)
+		}
+
+		// 如果不是最后一次尝试，继续重试
+		if i < maxRetries-1 {
+			if resp != nil {
+				resp.Body.Close()
+			}
+			continue
+		}
+	}
+
 	if err != nil {
 		if p.config.Debug {
-			log.Printf("[DEBUG] /v2/ RoundTrip error: %v", err)
+			log.Printf("[DEBUG] /v2/ RoundTrip failed after %d attempts: %v", maxRetries, err)
 		}
-		p.writeErrorResponse(w, err.Error(), http.StatusInternalServerError)
+		p.writeErrorResponse(w, fmt.Sprintf("upstream connection failed after %d attempts: %v", maxRetries, err), http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
