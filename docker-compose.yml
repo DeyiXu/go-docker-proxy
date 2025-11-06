@@ -16,6 +16,11 @@ services:
       # 示例: BLOCKED_HOSTS=example.com,another.com
       - BLOCKED_HOSTS=
       
+      # 自定义DNS配置
+      - DNS_ENABLED=false  # true=启用自定义DNS, false=使用系统DNS
+      - DNS_SERVERS=8.8.8.8:53,8.8.4.4:53  # DNS服务器列表，逗号分隔
+      - DNS_TIMEOUT=5s  # DNS查询超时时间
+      
       # 调试和开发
       - DEBUG=true
       - TARGET_UPSTREAM=https://registry-1.docker.io

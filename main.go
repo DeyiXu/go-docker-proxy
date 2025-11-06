@@ -30,6 +30,9 @@ type Config struct {
 	CustomDomain        string
 	Routes              map[string]string
 	BlockedHostPatterns []string // 黑名单域名模式
+	DNSEnabled          bool     // 是否启用自定义DNS
+	DNSServers          []string // DNS服务器列表
+	DNSTimeout          string   // DNS查询超时时间
 }
 
 type ProxyServer struct {
@@ -93,6 +96,17 @@ func NewProxyServer() *ProxyServer {
 		}
 	}
 
+	// 解析DNS服务器列表
+	var dnsServers []string
+	if dnsServersStr := getEnv("DNS_SERVERS", ""); dnsServersStr != "" {
+		for _, server := range strings.Split(dnsServersStr, ",") {
+			server = strings.TrimSpace(server)
+			if server != "" {
+				dnsServers = append(dnsServers, server)
+			}
+		}
+	}
+
 	config := &Config{
 		Port:                getEnv("PORT", "8080"),
 		CacheDir:            getEnv("CACHE_DIR", "./cache"),
@@ -101,7 +115,13 @@ func NewProxyServer() *ProxyServer {
 		CustomDomain:        customDomain,
 		Routes:              buildRoutes(customDomain),
 		BlockedHostPatterns: blockedHostPatterns,
+		DNSEnabled:          getEnv("DNS_ENABLED", "false") == "true",
+		DNSServers:          dnsServers,
+		DNSTimeout:          getEnv("DNS_TIMEOUT", "5s"),
 	}
+
+	// 初始化自定义DNS解析器
+	initCustomDNS(config)
 
 	cache := NewFileCache(config.CacheDir)
 
