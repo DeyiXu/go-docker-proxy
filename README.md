@@ -59,25 +59,25 @@ https://www.docker.com/increase-rate-limit
 ## 📖 文档导航
 
 ### 快速开始
-- **[快速部署指南](./QUICK_START.md)** - 10分钟完成快速部署 🚀
-- **[快速参考卡片](./REFERENCE_CARD.md)** - 常用命令和配置速查
+- **[快速部署指南](./docs/QUICK_START.md)** - 10分钟完成快速部署 🚀
+- **[快速参考卡片](./docs/REFERENCE_CARD.md)** - 常用命令和配置速查
 
 ### 部署文档
-- **[完整部署指南](./DEPLOYMENT_GUIDE.md)** - 详细部署指南(全球访问优化) ⭐
-- **[网络优化配置](./NETWORK_OPTIMIZATION.md)** - 系统和应用层网络优化详解
+- **[完整部署指南](./docs/DEPLOYMENT_GUIDE.md)** - 详细部署指南(全球访问优化) ⭐
+- **[网络优化配置](./docs/NETWORK_OPTIMIZATION.md)** - 系统和应用层网络优化详解
 
 ### 技术文档
-- **[架构文档](./ARCHITECTURE.md)** - 系统架构和设计原理
-- **[优化方案总结](./OPTIMIZATION_SUMMARY.md)** - 性能优化总结
+- **[架构文档](./docs/ARCHITECTURE.md)** - 系统架构和设计原理
+- **[项目结构](./docs/PROJECT_STRUCTURE.md)** - 项目目录和文件说明
+- **[调试日志](./docs/DEBUG_LOGGING.md)** - 调试模式使用说明
 - **[变更日志](./CHANGELOG.md)** - 版本更新记录
-- **[AWS S3 重定向修复](./AWS_REDIRECT_FIX.md)** - AWS S3 blob 下载问题修复说明
 
 ### 合规性
-- **[合规性说明](./COMPLIANCE.md)** - 文档合规性和技术中立原则
+- **[合规性说明](./docs/COMPLIANCE.md)** - 文档合规性和技术中立原则
 
 ### 实用工具
-- **`deploy.sh`** - 一键部署脚本(自动安装和配置)
-- **`monitor.sh`** - 服务监控脚本(实时状态、日志、性能测试)
+- **[`scripts/deploy.sh`](./scripts/deploy.sh)** - 一键部署脚本(自动安装和配置)
+- **[`scripts/monitor.sh`](./scripts/monitor.sh)** - 服务监控脚本(实时状态、日志、性能测试)
 
 ## 快速开始
 
@@ -239,7 +239,7 @@ curl http://unknown-domain.com:8080/
 
 **如果您需要部署服务,同时保证全球用户能够正常访问,请查看详细的部署指南:**
 
-👉 **[完整部署指南](./DEPLOYMENT_GUIDE.md)** - 包含:
+👉 **[完整部署指南](./docs/DEPLOYMENT_GUIDE.md)** - 包含:
 - 地理位置选择建议(亚太/欧洲/美洲等区域)
 - 网络层优化(BBR、连接池、HTTP/2)
 - CDN加速配置(Cloudflare 免费方案)
@@ -255,7 +255,7 @@ git clone https://github.com/DeyiXu/go-docker-proxy.git
 cd go-docker-proxy
 
 # 上传到服务器后,运行一键部署脚本
-sudo ./deploy.sh
+sudo ./scripts/deploy.sh
 ```
 
 脚本会自动完成:

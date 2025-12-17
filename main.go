@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -20,6 +21,13 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+)
+
+const (
+	// 最大可缓存的响应大小 (50MB)，超过此大小的响应将直接流式传输不缓存
+	maxCacheableSize = 50 * 1024 * 1024
+	// 流式传输缓冲区大小 (256KB)，适合大文件传输
+	streamBufferSize = 256 * 1024
 )
 
 type Config struct {
@@ -125,7 +133,7 @@ func NewProxyServer() *ProxyServer {
 
 	cache := NewFileCache(config.CacheDir)
 
-	// 配置高性能的 Transport
+	// 配置高性能的 Transport（优化大文件传输）
 	transport := &http.Transport{
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   20,
@@ -133,8 +141,8 @@ func NewProxyServer() *ProxyServer {
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second, // 添加响应头超时
-		DisableKeepAlives:     false,            // 启用 Keep-Alive
+		ResponseHeaderTimeout: 30 * time.Second,
+		DisableKeepAlives:     false,
 
 		// TLS 配置
 		TLSClientConfig: &tls.Config{
@@ -147,6 +155,10 @@ func NewProxyServer() *ProxyServer {
 
 		// 禁用压缩，让客户端直接处理
 		DisableCompression: true,
+
+		// 增大写缓冲区，优化大文件传输
+		WriteBufferSize: 256 * 1024, // 256KB
+		ReadBufferSize:  256 * 1024, // 256KB
 	}
 
 	return &ProxyServer{
@@ -221,9 +233,11 @@ func (p *ProxyServer) Start() {
 		Addr:    ":" + p.config.Port,
 		Handler: r,
 
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 60 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      0, // 禁用写超时，支持大文件长时间传输
+		IdleTimeout:       120 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,
+		MaxHeaderBytes:    1 << 20, // 1MB
 	}
 
 	log.Fatal(p.server.ListenAndServe())
@@ -816,7 +830,7 @@ func (p *ProxyServer) createProxyRequest(originalReq *http.Request, targetURL *u
 	return req
 }
 
-// 专门为 RoundTrip 优化的响应复制
+// 专门为 RoundTrip 优化的响应复制（支持大文件流式传输）
 func (p *ProxyServer) copyResponseRoundTrip(w http.ResponseWriter, resp *http.Response) {
 	// 复制响应头，过滤不需要的头
 	skipHeaders := map[string]bool{
@@ -837,24 +851,52 @@ func (p *ProxyServer) copyResponseRoundTrip(w http.ResponseWriter, resp *http.Re
 
 	w.WriteHeader(resp.StatusCode)
 
-	// 使用缓冲复制提高性能
+	// 使用大缓冲区流式传输，支持大文件
 	if resp.Body != nil {
-		buf := make([]byte, 32*1024) // 32KB 缓冲区
-		for {
-			n, err := resp.Body.Read(buf)
-			if n > 0 {
-				if _, writeErr := w.Write(buf[:n]); writeErr != nil {
-					return
-				}
-			}
-			if err != nil {
-				break
-			}
-		}
+		p.streamCopy(w, resp.Body)
 	}
 }
 
-// 带缓存的响应复制（RoundTrip版本）
+// streamCopy 高效流式复制，支持大文件传输
+func (p *ProxyServer) streamCopy(dst io.Writer, src io.Reader) (written int64, err error) {
+	// 使用 bufio 包装，提高读取效率
+	bufReader := bufio.NewReaderSize(src, streamBufferSize)
+	buf := make([]byte, streamBufferSize)
+
+	// 尝试获取 Flusher 接口，用于实时刷新数据到客户端
+	flusher, canFlush := dst.(http.Flusher)
+
+	for {
+		nr, readErr := bufReader.Read(buf)
+		if nr > 0 {
+			nw, writeErr := dst.Write(buf[:nr])
+			if nw > 0 {
+				written += int64(nw)
+			}
+			if writeErr != nil {
+				err = writeErr
+				break
+			}
+			if nr != nw {
+				err = io.ErrShortWrite
+				break
+			}
+			// 定期刷新，确保数据及时发送到客户端
+			if canFlush {
+				flusher.Flush()
+			}
+		}
+		if readErr != nil {
+			if readErr != io.EOF {
+				err = readErr
+			}
+			break
+		}
+	}
+	return written, err
+}
+
+// 带缓存的响应复制（RoundTrip版本，支持大文件流式传输）
 func (p *ProxyServer) copyResponseWithCacheRoundTrip(w http.ResponseWriter, resp *http.Response, cacheKey string, shouldStore bool) {
 	skipHeaders := map[string]bool{
 		"Connection":        true,
@@ -882,25 +924,62 @@ func (p *ProxyServer) copyResponseWithCacheRoundTrip(w http.ResponseWriter, resp
 		return
 	}
 
+	// 不需要缓存或非 200 响应，直接流式传输
 	if !shouldStore || resp.StatusCode != http.StatusOK {
 		w.WriteHeader(resp.StatusCode)
-		if _, err := io.Copy(w, resp.Body); err != nil {
-			fmt.Printf("proxy copy error: %v\n", err)
+		if _, err := p.streamCopy(w, resp.Body); err != nil {
+			if p.config.Debug {
+				log.Printf("[DEBUG] Stream copy error: %v", err)
+			}
 		}
 		return
 	}
 
+	// 检查 Content-Length，判断是否为大文件
+	contentLength := resp.ContentLength
+	if contentLength < 0 {
+		// 尝试从 Header 获取
+		if clStr := resp.Header.Get("Content-Length"); clStr != "" {
+			if cl, err := strconv.ParseInt(clStr, 10, 64); err == nil {
+				contentLength = cl
+			}
+		}
+	}
+
+	// 大文件：直接流式传输，不缓存到内存
+	if contentLength > maxCacheableSize || contentLength < 0 {
+		if p.config.Debug {
+			if contentLength > 0 {
+				log.Printf("[DEBUG] Large file detected (%d bytes), streaming without memory cache: %s",
+					contentLength, cacheKey)
+			} else {
+				log.Printf("[DEBUG] Unknown content length, streaming without memory cache: %s", cacheKey)
+			}
+		}
+		w.Header().Set("X-Cache", "BYPASS")
+		w.WriteHeader(resp.StatusCode)
+		if _, err := p.streamCopy(w, resp.Body); err != nil {
+			if p.config.Debug {
+				log.Printf("[DEBUG] Large file stream error: %v", err)
+			}
+		}
+		return
+	}
+
+	// 小文件：读取到内存并缓存
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		w.WriteHeader(resp.StatusCode)
 		if len(bodyBytes) > 0 {
 			_, _ = w.Write(bodyBytes)
 		}
-		fmt.Printf("proxy cache read error: %v\n", err)
+		if p.config.Debug {
+			log.Printf("[DEBUG] Cache read error: %v", err)
+		}
 		return
 	}
 
-	// 验证响应内容：只缓存有效的响应（Content-Length > 0）
+	// 验证响应内容：只缓存有效的响应
 	if len(bodyBytes) == 0 {
 		if p.config.Debug {
 			log.Printf("[DEBUG] Skipping cache for empty response: %s", cacheKey)
@@ -913,10 +992,9 @@ func (p *ProxyServer) copyResponseWithCacheRoundTrip(w http.ResponseWriter, resp
 
 	w.Header().Set("X-Cache", "MISS")
 	w.WriteHeader(resp.StatusCode)
-	if len(bodyBytes) > 0 {
-		_, _ = w.Write(bodyBytes)
-	}
+	_, _ = w.Write(bodyBytes)
 
+	// 异步存储到缓存
 	go p.cache.Set(cacheKey, bodyBytes, headersToCache, resp.StatusCode, 1*time.Hour)
 }
 
