@@ -46,10 +46,10 @@ type Config struct {
 }
 
 type ProxyServer struct {
-	config    *Config
-	cache     *FileCache
-	transport *http.Transport
-	server    *http.Server
+	config       *Config
+	cacheManager *CacheManager // 新的统一缓存管理器
+	transport    *http.Transport
+	server       *http.Server
 }
 
 func main() {
@@ -139,8 +139,6 @@ func NewProxyServer() *ProxyServer {
 	// 初始化自定义DNS解析器
 	initCustomDNS(config)
 
-	cache := NewFileCacheWithTTL(config.CacheDir, config.CacheManifestTTL, config.CacheBlobTTL)
-
 	// 配置高性能的 Transport（优化大文件传输）
 	transport := &http.Transport{
 		MaxIdleConns:          100,
@@ -169,10 +167,25 @@ func NewProxyServer() *ProxyServer {
 		ReadBufferSize:  256 * 1024, // 256KB
 	}
 
+	// 创建缓存管理器
+	cacheConfig := &CacheConfig{
+		Dir:             config.CacheDir,
+		MaxSize:         10 * 1024 * 1024 * 1024, // 10GB
+		ManifestTTL:     config.CacheManifestTTL,
+		BlobTTL:         config.CacheBlobTTL,
+		CleanupInterval: 30 * time.Minute,
+		Debug:           config.Debug,
+	}
+
+	cacheManager, err := NewCacheManager(cacheConfig)
+	if err != nil {
+		log.Fatalf("Failed to create cache manager: %v", err)
+	}
+
 	return &ProxyServer{
-		config:    config,
-		cache:     cache,
-		transport: transport,
+		config:       config,
+		cacheManager: cacheManager,
+		transport:    transport,
 	}
 }
 
@@ -214,6 +227,10 @@ func (p *ProxyServer) Start() {
 	// 健康检查端点
 	r.Get("/health", p.handleHealth)
 	r.Get("/healthz", p.handleHealth)
+
+	// 缓存统计端点
+	r.Get("/stats", p.handleStats)
+	r.Get("/stats/cache", p.handleCacheStats)
 
 	// 路由定义
 	r.Get("/", p.handleRoot)
@@ -271,6 +288,44 @@ func (p *ProxyServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(health)
+}
+
+// 统计信息处理器
+func (p *ProxyServer) handleStats(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+
+	stats := map[string]interface{}{
+		"uptime":  time.Since(startTime).String(),
+		"enabled": p.config.CacheEnabled,
+	}
+
+	if p.cacheManager != nil {
+		stats["cache"] = p.cacheManager.Stats()
+	}
+
+	json.NewEncoder(w).Encode(stats)
+}
+
+// 详细缓存统计
+func (p *ProxyServer) handleCacheStats(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+
+	stats := map[string]interface{}{
+		"config": map[string]interface{}{
+			"directory":   p.config.CacheDir,
+			"manifestTTL": p.config.CacheManifestTTL.String(),
+			"blobTTL":     p.config.CacheBlobTTL.String(),
+			"enabled":     p.config.CacheEnabled,
+		},
+	}
+
+	if p.cacheManager != nil {
+		stats["stats"] = p.cacheManager.Stats()
+	}
+
+	json.NewEncoder(w).Encode(stats)
 }
 
 var startTime = time.Now()
@@ -499,32 +554,88 @@ func (p *ProxyServer) handleV2Request(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 生成缓存键
+	cacheKey := CacheKey(r.Host, r.URL.Path)
+	isCacheableRequest := IsCacheable(r.URL.Path)
+
 	// 检查缓存（如果启用）
-	if p.config.CacheEnabled {
-		cacheKey := p.generateCacheKey(r.Host, r.URL.Path)
-		if p.isCacheable(r.URL.Path) {
-			if cachedItem, found := p.cache.Get(cacheKey); found {
+	if p.config.CacheEnabled && isCacheableRequest && p.cacheManager != nil {
+		if entry, found := p.cacheManager.Get(cacheKey); found {
+			if p.config.Debug {
+				log.Printf("[DEBUG] /v2/* Cache HIT: %s", r.URL.Path)
+			}
+			p.serveCachedEntry(w, entry)
+			return
+		}
+		if p.config.Debug {
+			log.Printf("[DEBUG] /v2/* Cache MISS: %s", r.URL.Path)
+		}
+	}
+
+	// 请求去重：防止多个客户端同时拉取相同内容时重复请求上游
+	// 类似 distribution/distribution 的 inflight 机制
+	if p.config.CacheEnabled && isCacheableRequest && r.Method == "GET" && p.cacheManager != nil {
+		first, wait, done := p.cacheManager.TryInflight(cacheKey)
+
+		if !first {
+			// 不是第一个请求，等待第一个请求完成
+			if p.config.Debug {
+				log.Printf("[DEBUG] /v2/* Waiting for inflight request: %s", r.URL.Path)
+			}
+
+			result, err := wait(r.Context())
+			if err != nil {
+				// 请求被取消
 				if p.config.Debug {
-					log.Printf("[DEBUG] /v2/* Cache HIT: %s", r.URL.Path)
+					log.Printf("[DEBUG] /v2/* Inflight wait cancelled: %v", err)
 				}
-				p.serveCachedResponse(w, cachedItem)
+				p.writeErrorResponse(w, "request cancelled", http.StatusRequestTimeout)
 				return
 			}
-			if p.config.Debug {
-				log.Printf("[DEBUG] /v2/* Cache MISS: %s", r.URL.Path)
+
+			// 第一个请求已完成，从缓存获取结果
+			if result != nil && result.Cached {
+				if entry, found := p.cacheManager.Get(cacheKey); found {
+					if p.config.Debug {
+						log.Printf("[DEBUG] /v2/* Inflight cache HIT: %s", r.URL.Path)
+					}
+					p.serveCachedEntry(w, entry)
+					return
+				}
 			}
+
+			// 缓存获取失败，回退到直接请求（不进入 inflight 追踪，因为第一个请求已失败）
+			if p.config.Debug {
+				log.Printf("[DEBUG] /v2/* Inflight fallback to direct request: %s", r.URL.Path)
+			}
+			// 回退请求不缓存，避免重复尝试缓存失败的内容
+			upstreamURL, _ := url.Parse(upstream + r.URL.Path)
+			upstreamURL.RawQuery = r.URL.RawQuery
+			p.proxyRequestWithRoundTripAndKey(w, r, upstreamURL, false, "")
+			return
 		}
+
+		// 是第一个请求，需要执行实际工作
+		// 请求完成后调用 done 通知等待者
+		defer func() {
+			// 检查是否已缓存
+			_, cached := p.cacheManager.Get(cacheKey)
+			done(&InflightResult{
+				CacheKey: cacheKey,
+				Cached:   cached,
+			})
+		}()
 	}
 
 	// 转发请求
 	upstreamURL, _ := url.Parse(upstream + r.URL.Path)
 	upstreamURL.RawQuery = r.URL.RawQuery
 
-	p.proxyRequestWithRoundTrip(w, r, upstreamURL, true)
+	p.proxyRequestWithRoundTripAndKey(w, r, upstreamURL, true, cacheKey)
 }
 
-// 使用 RoundTrip 进行底层代理控制
-func (p *ProxyServer) proxyRequestWithRoundTrip(w http.ResponseWriter, r *http.Request, targetURL *url.URL, enableCache bool) {
+// proxyRequestWithRoundTripAndKey 使用 RoundTrip 进行底层代理控制（带缓存键）
+func (p *ProxyServer) proxyRequestWithRoundTripAndKey(w http.ResponseWriter, r *http.Request, targetURL *url.URL, enableCache bool, cacheKey string) {
 	if p.config.Debug {
 		log.Printf("[DEBUG] Proxy request to: %s", targetURL.String())
 	}
@@ -599,10 +710,13 @@ func (p *ProxyServer) proxyRequestWithRoundTrip(w http.ResponseWriter, r *http.R
 		}
 	}
 
-	shouldCache := p.config.CacheEnabled && enableCache && p.isCacheable(r.URL.Path)
+	shouldCache := p.config.CacheEnabled && enableCache && IsCacheable(r.URL.Path) && p.cacheManager != nil
 
 	if shouldCache {
-		cacheKey := p.generateCacheKey(r.Host, r.URL.Path)
+		// 使用传入的 cacheKey，如果为空则生成新的
+		if cacheKey == "" {
+			cacheKey = CacheKey(r.Host, r.URL.Path)
+		}
 		p.copyResponseWithCacheRoundTrip(w, resp, cacheKey, true)
 	} else {
 		p.copyResponseWithCacheRoundTrip(w, resp, "", false)
@@ -933,7 +1047,7 @@ func (p *ProxyServer) copyResponseWithCacheRoundTrip(w http.ResponseWriter, resp
 	}
 
 	// 不需要缓存或非 200 响应，直接流式传输
-	if !shouldStore || resp.StatusCode != http.StatusOK {
+	if !shouldStore || resp.StatusCode != http.StatusOK || p.cacheManager == nil {
 		w.WriteHeader(resp.StatusCode)
 		if _, err := p.streamCopy(w, resp.Body); err != nil {
 			if p.config.Debug {
@@ -1003,20 +1117,40 @@ func (p *ProxyServer) copyResponseWithCacheRoundTrip(w http.ResponseWriter, resp
 	_, _ = w.Write(bodyBytes)
 
 	// 异步存储到缓存
-	go p.cache.Set(cacheKey, bodyBytes, headersToCache, resp.StatusCode, 1*time.Hour)
+	go func() {
+		// 获取 mediaType
+		mediaType := ""
+		if ct, ok := headersToCache["Content-Type"]; ok && len(ct) > 0 {
+			mediaType = ct[0]
+		}
+
+		entry := &CacheEntry{
+			Descriptor: Descriptor{
+				Size:      int64(len(bodyBytes)),
+				MediaType: mediaType,
+			},
+			Data:       bodyBytes,
+			Headers:    headersToCache,
+			StatusCode: resp.StatusCode,
+			CachedAt:   time.Now(),
+			ExpiresAt:  time.Now().Add(1 * time.Hour),
+		}
+		p.cacheManager.Put(cacheKey, entry)
+	}()
 }
 
-func (p *ProxyServer) serveCachedResponse(w http.ResponseWriter, item *CacheItem) {
-	for key, values := range item.Headers {
+// serveCachedEntry 提供缓存响应
+func (p *ProxyServer) serveCachedEntry(w http.ResponseWriter, entry *CacheEntry) {
+	for key, values := range entry.Headers {
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
 	}
 
 	w.Header().Set("X-Cache", "HIT")
-	w.WriteHeader(item.StatusCode)
-	if len(item.Data) > 0 {
-		_, _ = w.Write(item.Data)
+	w.WriteHeader(entry.StatusCode)
+	if len(entry.Data) > 0 {
+		_, _ = w.Write(entry.Data)
 	}
 }
 
@@ -1027,15 +1161,6 @@ func (p *ProxyServer) writeRoutesResponse(w http.ResponseWriter) {
 		"routes":  p.config.Routes,
 		"message": "Available registry routes",
 	})
-}
-
-func (p *ProxyServer) generateCacheKey(host, path string) string {
-	return fmt.Sprintf("%s%s", host, path)
-}
-
-func (p *ProxyServer) isCacheable(path string) bool {
-	return strings.Contains(path, "/manifests/") ||
-		strings.Contains(path, "/blobs/sha256:")
 }
 
 func (p *ProxyServer) writeErrorResponse(w http.ResponseWriter, message string, statusCode int) {
