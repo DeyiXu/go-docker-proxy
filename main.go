@@ -33,7 +33,9 @@ const (
 type Config struct {
 	Port                string
 	CacheDir            string
-	CacheEnabled        bool // 缓存开关
+	CacheEnabled        bool          // 缓存开关
+	CacheManifestTTL    time.Duration // manifest by tag 缓存时间
+	CacheBlobTTL        time.Duration // blob 缓存时间 (不可变内容)
 	Debug               bool
 	CustomDomain        string
 	Routes              map[string]string
@@ -115,10 +117,16 @@ func NewProxyServer() *ProxyServer {
 		}
 	}
 
+	// 解析缓存 TTL 配置
+	manifestTTL := parseDuration(getEnv("CACHE_MANIFEST_TTL", "1d"), 24*time.Hour)
+	blobTTL := parseDuration(getEnv("CACHE_BLOB_TTL", "1y"), 365*24*time.Hour) // 默认 1 年
+
 	config := &Config{
 		Port:                getEnv("PORT", "8080"),
 		CacheDir:            getEnv("CACHE_DIR", "./cache"),
 		CacheEnabled:        getEnv("CACHE_ENABLED", "true") == "true", // 默认启用缓存
+		CacheManifestTTL:    manifestTTL,
+		CacheBlobTTL:        blobTTL,
 		Debug:               getEnv("DEBUG", "false") == "true",
 		CustomDomain:        customDomain,
 		Routes:              buildRoutes(customDomain),
@@ -131,7 +139,7 @@ func NewProxyServer() *ProxyServer {
 	// 初始化自定义DNS解析器
 	initCustomDNS(config)
 
-	cache := NewFileCache(config.CacheDir)
+	cache := NewFileCacheWithTTL(config.CacheDir, config.CacheManifestTTL, config.CacheBlobTTL)
 
 	// 配置高性能的 Transport（优化大文件传输）
 	transport := &http.Transport{
@@ -1043,4 +1051,48 @@ func getEnv(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+// parseDuration 解析时间间隔字符串，支持扩展格式
+// 支持格式: 1h, 24h, 1d, 7d, 30d, 1y, 365d 等
+// 标准格式: h(小时), m(分钟), s(秒)
+// 扩展格式: d(天), w(周), M(月=30天), y(年=365天)
+func parseDuration(s string, defaultValue time.Duration) time.Duration {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return defaultValue
+	}
+
+	// 先尝试标准格式
+	if d, err := time.ParseDuration(s); err == nil {
+		return d
+	}
+
+	// 处理扩展格式
+	var multiplier time.Duration
+	var numStr string
+
+	switch {
+	case strings.HasSuffix(s, "y"):
+		multiplier = 365 * 24 * time.Hour
+		numStr = strings.TrimSuffix(s, "y")
+	case strings.HasSuffix(s, "M"):
+		multiplier = 30 * 24 * time.Hour
+		numStr = strings.TrimSuffix(s, "M")
+	case strings.HasSuffix(s, "w"):
+		multiplier = 7 * 24 * time.Hour
+		numStr = strings.TrimSuffix(s, "w")
+	case strings.HasSuffix(s, "d"):
+		multiplier = 24 * time.Hour
+		numStr = strings.TrimSuffix(s, "d")
+	default:
+		return defaultValue
+	}
+
+	num, err := strconv.ParseFloat(strings.TrimSpace(numStr), 64)
+	if err != nil || num < 0 {
+		return defaultValue
+	}
+
+	return time.Duration(float64(multiplier) * num)
 }

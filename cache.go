@@ -42,6 +42,15 @@ type CacheStats struct {
 	LastCleanup time.Time
 }
 
+// CacheStatsSnapshot 缓存统计信息快照（用于返回统计数据）
+type CacheStatsSnapshot struct {
+	Hits        int64
+	Misses      int64
+	TotalSize   int64
+	ItemCount   int64
+	LastCleanup time.Time
+}
+
 // DockerRegistryCache 专为 Docker Registry 设计的缓存系统
 type DockerRegistryCache struct {
 	cacheDir    string
@@ -79,8 +88,8 @@ func NewDockerRegistryCache(cacheDir string) *DockerRegistryCache {
 		index:           make(map[string]*CacheItem),
 		stats:           &CacheStats{},
 		maxSize:         10 * 1024 * 1024 * 1024, // 默认 10GB
-		manifestTTL:     1 * time.Hour,           // manifest 缓存 1 小时
-		blobTTL:         7 * 24 * time.Hour,      // blob 缓存 7 天
+		manifestTTL:     24 * time.Hour,          // manifest by tag 缓存 24 小时 (tag 可能更新)
+		blobTTL:         365 * 24 * time.Hour,    // blob 缓存 1 年 (SHA256 内容不可变，可永久缓存)
 		cleanupInterval: 30 * time.Minute,        // 每 30 分钟清理一次
 	}
 
@@ -98,16 +107,36 @@ func NewFileCache(cacheDir string) *FileCache {
 	return NewDockerRegistryCache(cacheDir)
 }
 
+// NewFileCacheWithTTL 创建带自定义 TTL 的缓存
+func NewFileCacheWithTTL(cacheDir string, manifestTTL, blobTTL time.Duration) *FileCache {
+	cache := NewDockerRegistryCache(cacheDir)
+	if manifestTTL > 0 {
+		cache.manifestTTL = manifestTTL
+	}
+	if blobTTL > 0 {
+		cache.blobTTL = blobTTL
+	}
+	return cache
+}
+
 // Set 添加内容到缓存
 func (c *DockerRegistryCache) Set(key string, data []byte, headers map[string][]string, statusCode int, ttl time.Duration) {
 	now := time.Now()
 	expiresAt := now.Add(ttl)
 
-	// 根据路径类型决定 TTL（优先使用路径判断）
-	if strings.Contains(key, "/manifests/") {
-		expiresAt = now.Add(c.manifestTTL)
-	} else if strings.Contains(key, "/blobs/") {
+	// 根据路径类型决定 TTL
+	// - Blob (sha256): 内容不可变，可永久缓存
+	// - Manifest by digest (sha256): 内容不可变，可永久缓存
+	// - Manifest by tag: tag 可能更新，使用较短缓存时间
+	if strings.Contains(key, "/blobs/sha256:") {
+		// Blob 由 SHA256 标识，内容永不改变
 		expiresAt = now.Add(c.blobTTL)
+	} else if strings.Contains(key, "/manifests/sha256:") {
+		// Manifest by digest 也是不可变的
+		expiresAt = now.Add(c.blobTTL)
+	} else if strings.Contains(key, "/manifests/") {
+		// Manifest by tag (如 latest) 可能会更新
+		expiresAt = now.Add(c.manifestTTL)
 	}
 
 	item := &CacheItem{
@@ -342,15 +371,15 @@ func (c *DockerRegistryCache) cleanup() {
 }
 
 // GetStats 获取缓存统计信息
-func (c *DockerRegistryCache) GetStats() CacheStats {
+func (c *DockerRegistryCache) GetStats() CacheStatsSnapshot {
 	c.statsMutex.RLock()
 	defer c.statsMutex.RUnlock()
 
-	return CacheStats{
-		Hits:        c.stats.Hits,
-		Misses:      c.stats.Misses,
-		TotalSize:   c.stats.TotalSize,
-		ItemCount:   c.stats.ItemCount,
+	return CacheStatsSnapshot{
+		Hits:        c.stats.Hits.Load(),
+		Misses:      c.stats.Misses.Load(),
+		TotalSize:   c.stats.TotalSize.Load(),
+		ItemCount:   c.stats.ItemCount.Load(),
 		LastCleanup: c.stats.LastCleanup,
 	}
 }
