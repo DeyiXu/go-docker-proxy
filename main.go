@@ -737,49 +737,96 @@ func (p *ProxyServer) isBlockedHost(host string) bool {
 }
 
 // 跟随签名 URL 重定向 (用于 AWS S3/Cloudflare R2 等外部存储)
+// followRedirectWithSignedURL 跟随签名 URL 重定向 (用于被墙域名)
+// 类似 distribution/distribution 的 checkHTTPRedirect，支持嵌套重定向并保留关键 headers
 func (p *ProxyServer) followRedirectWithSignedURL(w http.ResponseWriter, signedURL *url.URL) {
-	if p.config.Debug {
-		log.Printf("[DEBUG] Following signed URL: %s", signedURL.String())
-	}
+	p.followRedirectWithSignedURLAndHeaders(w, signedURL, nil, 0)
+}
 
-	// 创建新的 GET 请求,不带原始请求的认证信息
-	req, err := http.NewRequest("GET", signedURL.String(), nil)
-	if err != nil {
+// followRedirectWithSignedURLAndHeaders 跟随重定向，保留 Accept 和 Range headers
+// maxRedirects: 最大重定向次数，类似 distribution 的 10 次限制
+func (p *ProxyServer) followRedirectWithSignedURLAndHeaders(w http.ResponseWriter, targetURL *url.URL, originalHeaders http.Header, redirectCount int) {
+	const maxRedirects = 10
+
+	if redirectCount >= maxRedirects {
 		if p.config.Debug {
-			log.Printf("[DEBUG] Failed to create signed URL request: %v", err)
+			log.Printf("[DEBUG] Max redirects (%d) exceeded", maxRedirects)
 		}
-		p.writeErrorResponse(w, fmt.Sprintf("invalid signed URL: %v", err), http.StatusBadGateway)
+		p.writeErrorResponse(w, "too many redirects", http.StatusBadGateway)
 		return
 	}
 
-	// 只设置必要的请求头
-	req.Header.Set("User-Agent", "go-docker-proxy/1.0")
-	// 不设置 Authorization 等认证头,因为签名 URL 本身包含认证信息
+	if p.config.Debug {
+		log.Printf("[DEBUG] Following redirect (%d/%d): %s", redirectCount+1, maxRedirects, targetURL.String())
+	}
 
-	// 使用 RoundTrip 执行请求
+	// 创建新的 GET 请求，不带原始请求的认证信息
+	req, err := http.NewRequest("GET", targetURL.String(), nil)
+	if err != nil {
+		if p.config.Debug {
+			log.Printf("[DEBUG] Failed to create redirect request: %v", err)
+		}
+		p.writeErrorResponse(w, fmt.Sprintf("invalid redirect URL: %v", err), http.StatusBadGateway)
+		return
+	}
+
+	// 设置 User-Agent
+	req.Header.Set("User-Agent", "go-docker-proxy/1.0")
+
+	// 保留 Accept 和 Range headers（类似 distribution/distribution 的做法）
+	if originalHeaders != nil {
+		if accept := originalHeaders.Get("Accept"); accept != "" {
+			req.Header.Set("Accept", accept)
+		}
+		if rangeHeader := originalHeaders.Get("Range"); rangeHeader != "" {
+			req.Header.Set("Range", rangeHeader)
+		}
+	}
+
+	// 使用 RoundTrip 执行请求（不自动跟随重定向）
 	resp, err := p.transport.RoundTrip(req)
 	if err != nil {
 		if p.config.Debug {
-			log.Printf("[DEBUG] Signed URL request error: %v", err)
+			log.Printf("[DEBUG] Redirect request error: %v", err)
 		}
-		p.writeErrorResponse(w, fmt.Sprintf("signed URL request failed: %v", err), http.StatusBadGateway)
+		p.writeErrorResponse(w, fmt.Sprintf("redirect request failed: %v", err), http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 
 	if p.config.Debug {
-		log.Printf("[DEBUG] Signed URL response status: %d", resp.StatusCode)
+		log.Printf("[DEBUG] Redirect response status: %d", resp.StatusCode)
 	}
 
-	// 如果返回 400/403,说明签名问题,记录详细错误
-	if resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusForbidden {
-		if p.config.Debug {
-			bodyBytes, _ := io.ReadAll(resp.Body)
-			log.Printf("[DEBUG] Signed URL error response: %s", string(bodyBytes))
+	// 处理嵌套重定向
+	if resp.StatusCode == http.StatusMovedPermanently ||
+		resp.StatusCode == http.StatusFound ||
+		resp.StatusCode == http.StatusSeeOther ||
+		resp.StatusCode == http.StatusTemporaryRedirect ||
+		resp.StatusCode == http.StatusPermanentRedirect {
+
+		location := resp.Header.Get("Location")
+		if location != "" {
+			nextURL, err := url.Parse(location)
+			if err == nil {
+				// 继续跟随重定向
+				p.followRedirectWithSignedURLAndHeaders(w, nextURL, req.Header, redirectCount+1)
+				return
+			}
 		}
 	}
 
-	// 直接返回响应,不缓存签名 URL 的结果(因为 URL 有时效性)
+	// 如果返回 400/403，说明签名问题，记录详细错误
+	if resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusForbidden {
+		if p.config.Debug {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			log.Printf("[DEBUG] Redirect error response: %s", string(bodyBytes))
+			// 重新创建响应 body
+			resp.Body = io.NopCloser(strings.NewReader(string(bodyBytes)))
+		}
+	}
+
+	// 返回最终响应
 	p.copyResponseRoundTrip(w, resp)
 }
 
