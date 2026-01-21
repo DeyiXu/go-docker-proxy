@@ -95,31 +95,38 @@ type CacheStatistics struct {
 
 // Snapshot 获取统计快照
 func (s *CacheStatistics) Snapshot() map[string]interface{} {
-	blobTotal := s.BlobHits.Load() + s.BlobMisses.Load()
-	manifestTotal := s.ManifestHits.Load() + s.ManifestMisses.Load()
+	blobHits := s.BlobHits.Load()
+	blobMisses := s.BlobMisses.Load()
+	blobTotal := blobHits + blobMisses
+
+	manifestHits := s.ManifestHits.Load()
+	manifestMisses := s.ManifestMisses.Load()
+	manifestTotal := manifestHits + manifestMisses
 
 	blobHitRate := float64(0)
 	if blobTotal > 0 {
-		blobHitRate = float64(s.BlobHits.Load()) / float64(blobTotal) * 100
+		blobHitRate = float64(blobHits) / float64(blobTotal) * 100
 	}
 
 	manifestHitRate := float64(0)
 	if manifestTotal > 0 {
-		manifestHitRate = float64(s.ManifestHits.Load()) / float64(manifestTotal) * 100
+		manifestHitRate = float64(manifestHits) / float64(manifestTotal) * 100
 	}
 
 	return map[string]interface{}{
 		"blob": map[string]interface{}{
-			"hits":    s.BlobHits.Load(),
-			"misses":  s.BlobMisses.Load(),
-			"hitRate": fmt.Sprintf("%.2f%%", blobHitRate),
-			"count":   s.BlobCount.Load(),
+			"count":    s.BlobCount.Load(),
+			"requests": blobTotal,
+			"hits":     blobHits,
+			"misses":   blobMisses,
+			"hitRate":  fmt.Sprintf("%.2f%%", blobHitRate),
 		},
 		"manifest": map[string]interface{}{
-			"hits":    s.ManifestHits.Load(),
-			"misses":  s.ManifestMisses.Load(),
-			"hitRate": fmt.Sprintf("%.2f%%", manifestHitRate),
-			"count":   s.ManifestCount.Load(),
+			"count":    s.ManifestCount.Load(),
+			"requests": manifestTotal,
+			"hits":     manifestHits,
+			"misses":   manifestMisses,
+			"hitRate":  fmt.Sprintf("%.2f%%", manifestHitRate),
 		},
 		"totalSize":      s.TotalSize.Load(),
 		"totalSizeHuman": formatBytes(s.TotalSize.Load()),
@@ -394,6 +401,7 @@ func (cm *CacheManager) Get(cacheKey string) (*CacheEntry, bool) {
 		if err == nil && entry != nil {
 			return entry, true
 		}
+		// GetManifest 内部已经记录了 miss
 	case "blob":
 		// 对于 blob，仅返回元数据（检查是否存在）
 		// 实际数据通过 GetBlobReader 流式读取
