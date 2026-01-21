@@ -409,9 +409,10 @@ func (cm *CacheManager) Get(cacheKey string) (*CacheEntry, bool) {
 				}
 				// 设置必要的响应头
 				entry.Headers["Content-Length"] = []string{strconv.FormatInt(desc.Size, 10)}
-				entry.Headers["Content-Type"] = []string{"application/octet-stream"}
 				if desc.MediaType != "" {
 					entry.Headers["Content-Type"] = []string{desc.MediaType}
+				} else {
+					entry.Headers["Content-Type"] = []string{"application/octet-stream"}
 				}
 				entry.Headers["Docker-Content-Digest"] = []string{desc.Digest}
 				return entry, true
@@ -441,9 +442,10 @@ func (cm *CacheManager) GetBlobReader(cacheKey string) (*CacheEntry, io.ReadClos
 		entry.Headers = make(map[string][]string)
 	}
 	entry.Headers["Content-Length"] = []string{strconv.FormatInt(entry.Descriptor.Size, 10)}
-	entry.Headers["Content-Type"] = []string{"application/octet-stream"}
 	if entry.Descriptor.MediaType != "" {
 		entry.Headers["Content-Type"] = []string{entry.Descriptor.MediaType}
+	} else {
+		entry.Headers["Content-Type"] = []string{"application/octet-stream"}
 	}
 	entry.Headers["Docker-Content-Digest"] = []string{entry.Descriptor.Digest}
 
