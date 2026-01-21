@@ -1225,8 +1225,50 @@ func (p *ProxyServer) copyResponseWithCacheRoundTrip(w http.ResponseWriter, resp
 		return
 	}
 
-	// HEAD 请求不缓存（没有 body），直接返回
-	if resp.Request != nil && resp.Request.Method == "HEAD" {
+	// 判断请求类型
+	method := ""
+	if resp.Request != nil {
+		method = resp.Request.Method
+	}
+	isManifest := strings.Contains(cacheKey, "/manifests/")
+
+	// HEAD 请求：对于 manifest 需要缓存 headers，其他直接返回
+	if method == "HEAD" {
+		if isManifest && resp.StatusCode == http.StatusOK && shouldStore && p.cacheManager != nil {
+			// manifest HEAD 请求，缓存 headers 后返回
+			w.Header().Set("X-Cache", "MISS")
+			w.WriteHeader(resp.StatusCode)
+
+			// 异步存储 headers 到缓存
+			go func() {
+				mediaType := ""
+				if ct, ok := headersToCache["Content-Type"]; ok && len(ct) > 0 {
+					mediaType = ct[0]
+				}
+
+				digest := ""
+				if dcd, ok := headersToCache["Docker-Content-Digest"]; ok && len(dcd) > 0 {
+					digest = dcd[0]
+				}
+
+				entry := &CacheEntry{
+					Descriptor: Descriptor{
+						Digest:    digest,
+						MediaType: mediaType,
+					},
+					Headers:    headersToCache,
+					StatusCode: resp.StatusCode,
+					CachedAt:   time.Now(),
+					ExpiresAt:  time.Now().Add(1 * time.Hour),
+				}
+				p.cacheManager.Put(cacheKey, entry)
+				if p.config.Debug {
+					log.Printf("[DEBUG] Cached manifest HEAD response: %s", cacheKey)
+				}
+			}()
+			return
+		}
+		// 非 manifest HEAD 请求，直接返回
 		w.WriteHeader(resp.StatusCode)
 		return
 	}
