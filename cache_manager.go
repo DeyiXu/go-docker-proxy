@@ -132,8 +132,16 @@ func (s *CacheStatistics) Snapshot() map[string]interface{} {
 		"totalSize":      s.TotalSize.Load(),
 		"totalSizeHuman": formatBytes(s.TotalSize.Load()),
 		"deduplication":  s.Deduplication.Load(),
-		"lastCleanup":    s.LastCleanup.Format(time.RFC3339),
+		"lastCleanup":    formatLastCleanup(s.LastCleanup),
 	}
+}
+
+// formatLastCleanup 格式化最后清理时间，零值时返回 N/A
+func formatLastCleanup(t time.Time) string {
+	if t.IsZero() {
+		return "N/A"
+	}
+	return t.Format(time.RFC3339)
 }
 
 // =============================================================================
