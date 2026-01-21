@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -406,6 +407,16 @@ func (cm *CacheManager) Get(cacheKey string) (*CacheEntry, bool) {
 					}
 					entry.Data = data
 					entry.StatusCode = http.StatusOK
+
+					// 设置必要的响应头（Docker 客户端需要这些头来显示进度）
+					if entry.Headers == nil {
+						entry.Headers = make(map[string][]string)
+					}
+					entry.Headers["Content-Length"] = []string{strconv.FormatInt(int64(len(data)), 10)}
+					entry.Headers["Content-Type"] = []string{"application/octet-stream"}
+					if entry.Descriptor.Digest != "" {
+						entry.Headers["Docker-Content-Digest"] = []string{entry.Descriptor.Digest}
+					}
 				}
 				return entry, true
 			}
