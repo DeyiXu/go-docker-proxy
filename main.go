@@ -36,6 +36,7 @@ type Config struct {
 	CacheEnabled        bool          // 缓存开关
 	CacheManifestTTL    time.Duration // manifest by tag 缓存时间
 	CacheBlobTTL        time.Duration // blob 缓存时间 (不可变内容)
+	FollowAllRedirects  bool          // 跟随所有重定向（启用后可缓存外部存储内容）
 	Debug               bool
 	CustomDomain        string
 	Routes              map[string]string
@@ -127,6 +128,7 @@ func NewProxyServer() *ProxyServer {
 		CacheEnabled:        getEnv("CACHE_ENABLED", "true") == "true", // 默认启用缓存
 		CacheManifestTTL:    manifestTTL,
 		CacheBlobTTL:        blobTTL,
+		FollowAllRedirects:  getEnv("FOLLOW_ALL_REDIRECTS", "false") == "true", // 跟随所有重定向以缓存
 		Debug:               getEnv("DEBUG", "false") == "true",
 		CustomDomain:        customDomain,
 		Routes:              buildRoutes(customDomain),
@@ -685,16 +687,21 @@ func (p *ProxyServer) proxyRequestWithRoundTripAndKey(w http.ResponseWriter, r *
 			// 检查重定向目标
 			redirectURL, err := url.Parse(location)
 			if err == nil {
-				// 使用黑名单机制决定如何处理重定向
-				if p.isBlockedHost(redirectURL.Host) {
-					// 黑名单中的域名:服务器端处理重定向
-					// 原因: 这些域名被墙，客户端无法直接访问
+				// 决定是否跟随重定向
+				// 1. FOLLOW_ALL_REDIRECTS=true: 跟随所有重定向（用于缓存所有内容）
+				// 2. 黑名单域名: 服务器端处理（被墙域名客户端无法访问）
+				shouldFollow := p.config.FollowAllRedirects || p.isBlockedHost(redirectURL.Host)
+
+				if shouldFollow {
 					if p.config.Debug {
-						log.Printf("[DEBUG] Blocked host detected (%s), following redirect server-side", redirectURL.Host)
+						if p.config.FollowAllRedirects {
+							log.Printf("[DEBUG] FOLLOW_ALL_REDIRECTS enabled, following redirect to: %s", redirectURL.Host)
+						} else {
+							log.Printf("[DEBUG] Blocked host detected (%s), following redirect server-side", redirectURL.Host)
+						}
 					}
-					// 使用 GET 方法跟随重定向,不带原始请求体和认证头
-					// 这样可以保持签名 URL 的完整性 (对于外部存储的签名 URL)
-					p.followRedirectWithSignedURL(w, redirectURL)
+					// 跟随重定向并缓存内容
+					p.followRedirectWithCache(w, r, redirectURL, cacheKey, enableCache)
 					return
 				}
 
@@ -734,6 +741,99 @@ func (p *ProxyServer) isBlockedHost(host string) bool {
 		}
 	}
 	return false
+}
+
+// followRedirectWithCache 跟随重定向并支持缓存
+// 用于 FOLLOW_ALL_REDIRECTS=true 场景，将外部存储内容缓存到本地
+func (p *ProxyServer) followRedirectWithCache(w http.ResponseWriter, originalReq *http.Request, targetURL *url.URL, cacheKey string, enableCache bool) {
+	p.followRedirectWithCacheInternal(w, originalReq, targetURL, cacheKey, enableCache, nil, 0)
+}
+
+func (p *ProxyServer) followRedirectWithCacheInternal(w http.ResponseWriter, originalReq *http.Request, targetURL *url.URL, cacheKey string, enableCache bool, originalHeaders http.Header, redirectCount int) {
+	const maxRedirects = 10
+
+	if redirectCount >= maxRedirects {
+		if p.config.Debug {
+			log.Printf("[DEBUG] Max redirects (%d) exceeded", maxRedirects)
+		}
+		p.writeErrorResponse(w, "too many redirects", http.StatusBadGateway)
+		return
+	}
+
+	if p.config.Debug {
+		log.Printf("[DEBUG] Following redirect with cache (%d/%d): %s", redirectCount+1, maxRedirects, targetURL.String())
+	}
+
+	// 创建新的 GET 请求，不带原始请求的认证信息
+	req, err := http.NewRequest("GET", targetURL.String(), nil)
+	if err != nil {
+		if p.config.Debug {
+			log.Printf("[DEBUG] Failed to create redirect request: %v", err)
+		}
+		p.writeErrorResponse(w, fmt.Sprintf("invalid redirect URL: %v", err), http.StatusBadGateway)
+		return
+	}
+
+	// 设置 User-Agent
+	req.Header.Set("User-Agent", "go-docker-proxy/1.0")
+
+	// 保留 Accept 和 Range headers
+	if originalHeaders != nil {
+		if accept := originalHeaders.Get("Accept"); accept != "" {
+			req.Header.Set("Accept", accept)
+		}
+		if rangeHeader := originalHeaders.Get("Range"); rangeHeader != "" {
+			req.Header.Set("Range", rangeHeader)
+		}
+	} else if originalReq != nil {
+		// 从原始请求获取
+		if accept := originalReq.Header.Get("Accept"); accept != "" {
+			req.Header.Set("Accept", accept)
+		}
+		if rangeHeader := originalReq.Header.Get("Range"); rangeHeader != "" {
+			req.Header.Set("Range", rangeHeader)
+		}
+	}
+
+	// 使用 RoundTrip 执行请求
+	resp, err := p.transport.RoundTrip(req)
+	if err != nil {
+		if p.config.Debug {
+			log.Printf("[DEBUG] Redirect request error: %v", err)
+		}
+		p.writeErrorResponse(w, fmt.Sprintf("redirect request failed: %v", err), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	if p.config.Debug {
+		log.Printf("[DEBUG] Redirect response status: %d, Content-Length: %d", resp.StatusCode, resp.ContentLength)
+	}
+
+	// 处理嵌套重定向
+	if resp.StatusCode == http.StatusMovedPermanently ||
+		resp.StatusCode == http.StatusFound ||
+		resp.StatusCode == http.StatusSeeOther ||
+		resp.StatusCode == http.StatusTemporaryRedirect ||
+		resp.StatusCode == http.StatusPermanentRedirect {
+
+		location := resp.Header.Get("Location")
+		if location != "" {
+			nextURL, err := url.Parse(location)
+			if err == nil {
+				p.followRedirectWithCacheInternal(w, originalReq, nextURL, cacheKey, enableCache, req.Header, redirectCount+1)
+				return
+			}
+		}
+	}
+
+	// 使用带缓存的响应处理
+	shouldCache := p.config.CacheEnabled && enableCache && cacheKey != "" && p.cacheManager != nil
+	if shouldCache {
+		p.copyResponseWithCacheRoundTrip(w, resp, cacheKey, true)
+	} else {
+		p.copyResponseRoundTrip(w, resp)
+	}
 }
 
 // 跟随签名 URL 重定向 (用于 AWS S3/Cloudflare R2 等外部存储)
