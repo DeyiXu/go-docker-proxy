@@ -490,8 +490,15 @@ func CacheKey(host, path string) string {
 }
 
 // ParsePath 解析路径，提取 repo 和 reference
-// 路径格式: /v2/{repo}/manifests/{reference} 或 /v2/{repo}/blobs/{digest}
+// 路径格式: host/v2/{repo}/manifests/{reference} 或 /v2/{repo}/blobs/{digest}
 func ParsePath(path string) (pathType, repo, reference string) {
+	// 找到 /v2/ 的位置（cacheKey 可能包含 host 前缀）
+	idx := strings.Index(path, "/v2/")
+	if idx == -1 {
+		return "", "", ""
+	}
+	path = path[idx:] // 只保留 /v2/ 及之后的部分
+
 	parts := strings.Split(strings.TrimPrefix(path, "/v2/"), "/")
 	if len(parts) < 3 {
 		return "", "", ""
