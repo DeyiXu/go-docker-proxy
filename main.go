@@ -36,7 +36,6 @@ type Config struct {
 	CacheEnabled        bool          // 缓存开关
 	CacheManifestTTL    time.Duration // manifest by tag 缓存时间
 	CacheBlobTTL        time.Duration // blob 缓存时间 (不可变内容)
-	FollowAllRedirects  bool          // 跟随所有重定向（启用后可缓存外部存储内容）
 	Debug               bool
 	CustomDomain        string
 	Routes              map[string]string
@@ -47,10 +46,10 @@ type Config struct {
 }
 
 type ProxyServer struct {
-	config       *Config
-	cacheManager *CacheManager // 新的统一缓存管理器
-	transport    *http.Transport
-	server       *http.Server
+	config    *Config
+	cache     *FileCache
+	transport *http.Transport
+	server    *http.Server
 }
 
 func main() {
@@ -128,7 +127,6 @@ func NewProxyServer() *ProxyServer {
 		CacheEnabled:        getEnv("CACHE_ENABLED", "true") == "true", // 默认启用缓存
 		CacheManifestTTL:    manifestTTL,
 		CacheBlobTTL:        blobTTL,
-		FollowAllRedirects:  getEnv("FOLLOW_ALL_REDIRECTS", "false") == "true", // 跟随所有重定向以缓存
 		Debug:               getEnv("DEBUG", "false") == "true",
 		CustomDomain:        customDomain,
 		Routes:              buildRoutes(customDomain),
@@ -140,6 +138,8 @@ func NewProxyServer() *ProxyServer {
 
 	// 初始化自定义DNS解析器
 	initCustomDNS(config)
+
+	cache := NewFileCacheWithTTL(config.CacheDir, config.CacheManifestTTL, config.CacheBlobTTL)
 
 	// 配置高性能的 Transport（优化大文件传输）
 	transport := &http.Transport{
@@ -169,25 +169,10 @@ func NewProxyServer() *ProxyServer {
 		ReadBufferSize:  256 * 1024, // 256KB
 	}
 
-	// 创建缓存管理器
-	cacheConfig := &CacheConfig{
-		Dir:             config.CacheDir,
-		MaxSize:         10 * 1024 * 1024 * 1024, // 10GB
-		ManifestTTL:     config.CacheManifestTTL,
-		BlobTTL:         config.CacheBlobTTL,
-		CleanupInterval: 30 * time.Minute,
-		Debug:           config.Debug,
-	}
-
-	cacheManager, err := NewCacheManager(cacheConfig)
-	if err != nil {
-		log.Fatalf("Failed to create cache manager: %v", err)
-	}
-
 	return &ProxyServer{
-		config:       config,
-		cacheManager: cacheManager,
-		transport:    transport,
+		config:    config,
+		cache:     cache,
+		transport: transport,
 	}
 }
 
@@ -229,10 +214,6 @@ func (p *ProxyServer) Start() {
 	// 健康检查端点
 	r.Get("/health", p.handleHealth)
 	r.Get("/healthz", p.handleHealth)
-
-	// 缓存统计端点
-	r.Get("/stats", p.handleStats)
-	r.Get("/stats/cache", p.handleCacheStats)
 
 	// 路由定义
 	r.Get("/", p.handleRoot)
@@ -290,44 +271,6 @@ func (p *ProxyServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(health)
-}
-
-// 统计信息处理器
-func (p *ProxyServer) handleStats(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-
-	stats := map[string]interface{}{
-		"uptime":  time.Since(startTime).String(),
-		"enabled": p.config.CacheEnabled,
-	}
-
-	if p.cacheManager != nil {
-		stats["cache"] = p.cacheManager.Stats()
-	}
-
-	json.NewEncoder(w).Encode(stats)
-}
-
-// 详细缓存统计
-func (p *ProxyServer) handleCacheStats(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-
-	stats := map[string]interface{}{
-		"config": map[string]interface{}{
-			"directory":   p.config.CacheDir,
-			"manifestTTL": p.config.CacheManifestTTL.String(),
-			"blobTTL":     p.config.CacheBlobTTL.String(),
-			"enabled":     p.config.CacheEnabled,
-		},
-	}
-
-	if p.cacheManager != nil {
-		stats["stats"] = p.cacheManager.Stats()
-	}
-
-	json.NewEncoder(w).Encode(stats)
 }
 
 var startTime = time.Now()
@@ -556,120 +499,32 @@ func (p *ProxyServer) handleV2Request(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 生成缓存键
-	cacheKey := CacheKey(r.Host, r.URL.Path)
-	isCacheableRequest := IsCacheable(r.URL.Path)
-	isBlob := strings.Contains(r.URL.Path, "/blobs/")
-	isHead := r.Method == "HEAD"
-
 	// 检查缓存（如果启用）
-	if p.config.CacheEnabled && isCacheableRequest && p.cacheManager != nil {
-		// 对于 blob 使用流式传输
-		if isBlob {
-			if entry, reader, found := p.cacheManager.GetBlobReader(cacheKey); found {
-				if p.config.Debug {
-					log.Printf("[DEBUG] /v2/* Cache HIT (streaming): %s", r.URL.Path)
-				}
-				if isHead {
-					reader.Close() // HEAD 请求不需要 body
-					p.serveCachedHeadEntry(w, entry)
-				} else {
-					p.serveCachedBlobStream(w, entry, reader)
-				}
-				return
-			}
-		} else {
-			// manifest 等小文件使用内存缓存
-			if entry, found := p.cacheManager.Get(cacheKey); found {
+	if p.config.CacheEnabled {
+		cacheKey := p.generateCacheKey(r.Host, r.URL.Path)
+		if p.isCacheable(r.URL.Path) {
+			if cachedItem, found := p.cache.Get(cacheKey); found {
 				if p.config.Debug {
 					log.Printf("[DEBUG] /v2/* Cache HIT: %s", r.URL.Path)
 				}
-				if isHead {
-					p.serveCachedHeadEntry(w, entry)
-				} else {
-					p.serveCachedEntry(w, entry)
-				}
+				p.serveCachedResponse(w, cachedItem)
 				return
 			}
-		}
-		if p.config.Debug {
-			log.Printf("[DEBUG] /v2/* Cache MISS: %s", r.URL.Path)
-		}
-	}
-
-	// 请求去重：防止多个客户端同时拉取相同内容时重复请求上游
-	// 类似 distribution/distribution 的 inflight 机制
-	if p.config.CacheEnabled && isCacheableRequest && r.Method == "GET" && p.cacheManager != nil {
-		first, wait, done := p.cacheManager.TryInflight(cacheKey)
-
-		if !first {
-			// 不是第一个请求，等待第一个请求完成
 			if p.config.Debug {
-				log.Printf("[DEBUG] /v2/* Waiting for inflight request: %s", r.URL.Path)
+				log.Printf("[DEBUG] /v2/* Cache MISS: %s", r.URL.Path)
 			}
-
-			result, err := wait(r.Context())
-			if err != nil {
-				// 请求被取消
-				if p.config.Debug {
-					log.Printf("[DEBUG] /v2/* Inflight wait cancelled: %v", err)
-				}
-				p.writeErrorResponse(w, "request cancelled", http.StatusRequestTimeout)
-				return
-			}
-
-			// 第一个请求已完成，从缓存获取结果
-			if result != nil && result.Cached {
-				// 对于 blob 使用流式传输
-				if isBlob {
-					if entry, reader, found := p.cacheManager.GetBlobReader(cacheKey); found {
-						if p.config.Debug {
-							log.Printf("[DEBUG] /v2/* Inflight cache HIT (streaming): %s", r.URL.Path)
-						}
-						p.serveCachedBlobStream(w, entry, reader)
-						return
-					}
-				} else if entry, found := p.cacheManager.Get(cacheKey); found {
-					if p.config.Debug {
-						log.Printf("[DEBUG] /v2/* Inflight cache HIT: %s", r.URL.Path)
-					}
-					p.serveCachedEntry(w, entry)
-					return
-				}
-			}
-
-			// 缓存获取失败，回退到直接请求（不进入 inflight 追踪，因为第一个请求已失败）
-			if p.config.Debug {
-				log.Printf("[DEBUG] /v2/* Inflight fallback to direct request: %s", r.URL.Path)
-			}
-			// 回退请求不缓存，避免重复尝试缓存失败的内容
-			upstreamURL, _ := url.Parse(upstream + r.URL.Path)
-			upstreamURL.RawQuery = r.URL.RawQuery
-			p.proxyRequestWithRoundTripAndKey(w, r, upstreamURL, false, "")
-			return
 		}
-
-		// 是第一个请求，需要执行实际工作
-		// 请求完成后调用 done 通知等待者
-		defer func() {
-			// 检查是否已缓存
-			_, cached := p.cacheManager.Get(cacheKey)
-			done(&InflightResult{
-				CacheKey: cacheKey,
-				Cached:   cached,
-			})
-		}()
 	}
 
 	// 转发请求
 	upstreamURL, _ := url.Parse(upstream + r.URL.Path)
 	upstreamURL.RawQuery = r.URL.RawQuery
 
-	p.proxyRequestWithRoundTripAndKey(w, r, upstreamURL, true, cacheKey)
+	p.proxyRequestWithRoundTrip(w, r, upstreamURL, true)
 }
 
-// proxyRequestWithRoundTripAndKey 使用 RoundTrip 进行底层代理控制（带缓存键）
-func (p *ProxyServer) proxyRequestWithRoundTripAndKey(w http.ResponseWriter, r *http.Request, targetURL *url.URL, enableCache bool, cacheKey string) {
+// 使用 RoundTrip 进行底层代理控制
+func (p *ProxyServer) proxyRequestWithRoundTrip(w http.ResponseWriter, r *http.Request, targetURL *url.URL, enableCache bool) {
 	if p.config.Debug {
 		log.Printf("[DEBUG] Proxy request to: %s", targetURL.String())
 	}
@@ -719,21 +574,16 @@ func (p *ProxyServer) proxyRequestWithRoundTripAndKey(w http.ResponseWriter, r *
 			// 检查重定向目标
 			redirectURL, err := url.Parse(location)
 			if err == nil {
-				// 决定是否跟随重定向
-				// 1. FOLLOW_ALL_REDIRECTS=true: 跟随所有重定向（用于缓存所有内容）
-				// 2. 黑名单域名: 服务器端处理（被墙域名客户端无法访问）
-				shouldFollow := p.config.FollowAllRedirects || p.isBlockedHost(redirectURL.Host)
-
-				if shouldFollow {
+				// 使用黑名单机制决定如何处理重定向
+				if p.isBlockedHost(redirectURL.Host) {
+					// 黑名单中的域名:服务器端处理重定向
+					// 原因: 这些域名被墙，客户端无法直接访问
 					if p.config.Debug {
-						if p.config.FollowAllRedirects {
-							log.Printf("[DEBUG] FOLLOW_ALL_REDIRECTS enabled, following redirect to: %s", redirectURL.Host)
-						} else {
-							log.Printf("[DEBUG] Blocked host detected (%s), following redirect server-side", redirectURL.Host)
-						}
+						log.Printf("[DEBUG] Blocked host detected (%s), following redirect server-side", redirectURL.Host)
 					}
-					// 跟随重定向并缓存内容
-					p.followRedirectWithCache(w, r, redirectURL, cacheKey, enableCache)
+					// 使用 GET 方法跟随重定向,不带原始请求体和认证头
+					// 这样可以保持签名 URL 的完整性 (对于外部存储的签名 URL)
+					p.followRedirectWithSignedURL(w, redirectURL)
 					return
 				}
 
@@ -749,13 +599,10 @@ func (p *ProxyServer) proxyRequestWithRoundTripAndKey(w http.ResponseWriter, r *
 		}
 	}
 
-	shouldCache := p.config.CacheEnabled && enableCache && IsCacheable(r.URL.Path) && p.cacheManager != nil
+	shouldCache := p.config.CacheEnabled && enableCache && p.isCacheable(r.URL.Path)
 
 	if shouldCache {
-		// 使用传入的 cacheKey，如果为空则生成新的
-		if cacheKey == "" {
-			cacheKey = CacheKey(r.Host, r.URL.Path)
-		}
+		cacheKey := p.generateCacheKey(r.Host, r.URL.Path)
 		p.copyResponseWithCacheRoundTrip(w, resp, cacheKey, true)
 	} else {
 		p.copyResponseWithCacheRoundTrip(w, resp, "", false)
@@ -775,190 +622,50 @@ func (p *ProxyServer) isBlockedHost(host string) bool {
 	return false
 }
 
-// followRedirectWithCache 跟随重定向并支持缓存
-// 用于 FOLLOW_ALL_REDIRECTS=true 场景，将外部存储内容缓存到本地
-func (p *ProxyServer) followRedirectWithCache(w http.ResponseWriter, originalReq *http.Request, targetURL *url.URL, cacheKey string, enableCache bool) {
-	p.followRedirectWithCacheInternal(w, originalReq, targetURL, cacheKey, enableCache, nil, 0)
-}
-
-func (p *ProxyServer) followRedirectWithCacheInternal(w http.ResponseWriter, originalReq *http.Request, targetURL *url.URL, cacheKey string, enableCache bool, originalHeaders http.Header, redirectCount int) {
-	const maxRedirects = 10
-
-	if redirectCount >= maxRedirects {
-		if p.config.Debug {
-			log.Printf("[DEBUG] Max redirects (%d) exceeded", maxRedirects)
-		}
-		p.writeErrorResponse(w, "too many redirects", http.StatusBadGateway)
-		return
-	}
-
+// 跟随签名 URL 重定向 (用于 AWS S3/Cloudflare R2 等外部存储)
+func (p *ProxyServer) followRedirectWithSignedURL(w http.ResponseWriter, signedURL *url.URL) {
 	if p.config.Debug {
-		log.Printf("[DEBUG] Following redirect with cache (%d/%d): %s", redirectCount+1, maxRedirects, targetURL.String())
+		log.Printf("[DEBUG] Following signed URL: %s", signedURL.String())
 	}
 
-	// 创建新的 GET 请求，不带原始请求的认证信息
-	req, err := http.NewRequest("GET", targetURL.String(), nil)
+	// 创建新的 GET 请求,不带原始请求的认证信息
+	req, err := http.NewRequest("GET", signedURL.String(), nil)
 	if err != nil {
 		if p.config.Debug {
-			log.Printf("[DEBUG] Failed to create redirect request: %v", err)
+			log.Printf("[DEBUG] Failed to create signed URL request: %v", err)
 		}
-		p.writeErrorResponse(w, fmt.Sprintf("invalid redirect URL: %v", err), http.StatusBadGateway)
+		p.writeErrorResponse(w, fmt.Sprintf("invalid signed URL: %v", err), http.StatusBadGateway)
 		return
 	}
 
-	// 设置 User-Agent
+	// 只设置必要的请求头
 	req.Header.Set("User-Agent", "go-docker-proxy/1.0")
-
-	// 保留 Accept 和 Range headers
-	if originalHeaders != nil {
-		if accept := originalHeaders.Get("Accept"); accept != "" {
-			req.Header.Set("Accept", accept)
-		}
-		if rangeHeader := originalHeaders.Get("Range"); rangeHeader != "" {
-			req.Header.Set("Range", rangeHeader)
-		}
-	} else if originalReq != nil {
-		// 从原始请求获取
-		if accept := originalReq.Header.Get("Accept"); accept != "" {
-			req.Header.Set("Accept", accept)
-		}
-		if rangeHeader := originalReq.Header.Get("Range"); rangeHeader != "" {
-			req.Header.Set("Range", rangeHeader)
-		}
-	}
+	// 不设置 Authorization 等认证头,因为签名 URL 本身包含认证信息
 
 	// 使用 RoundTrip 执行请求
 	resp, err := p.transport.RoundTrip(req)
 	if err != nil {
 		if p.config.Debug {
-			log.Printf("[DEBUG] Redirect request error: %v", err)
+			log.Printf("[DEBUG] Signed URL request error: %v", err)
 		}
-		p.writeErrorResponse(w, fmt.Sprintf("redirect request failed: %v", err), http.StatusBadGateway)
+		p.writeErrorResponse(w, fmt.Sprintf("signed URL request failed: %v", err), http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 
 	if p.config.Debug {
-		log.Printf("[DEBUG] Redirect response status: %d, Content-Length: %d", resp.StatusCode, resp.ContentLength)
+		log.Printf("[DEBUG] Signed URL response status: %d", resp.StatusCode)
 	}
 
-	// 处理嵌套重定向
-	if resp.StatusCode == http.StatusMovedPermanently ||
-		resp.StatusCode == http.StatusFound ||
-		resp.StatusCode == http.StatusSeeOther ||
-		resp.StatusCode == http.StatusTemporaryRedirect ||
-		resp.StatusCode == http.StatusPermanentRedirect {
-
-		location := resp.Header.Get("Location")
-		if location != "" {
-			nextURL, err := url.Parse(location)
-			if err == nil {
-				p.followRedirectWithCacheInternal(w, originalReq, nextURL, cacheKey, enableCache, req.Header, redirectCount+1)
-				return
-			}
-		}
-	}
-
-	// 使用带缓存的响应处理
-	shouldCache := p.config.CacheEnabled && enableCache && cacheKey != "" && p.cacheManager != nil
-	if shouldCache {
-		p.copyResponseWithCacheRoundTrip(w, resp, cacheKey, true)
-	} else {
-		p.copyResponseRoundTrip(w, resp)
-	}
-}
-
-// 跟随签名 URL 重定向 (用于 AWS S3/Cloudflare R2 等外部存储)
-// followRedirectWithSignedURL 跟随签名 URL 重定向 (用于被墙域名)
-// 类似 distribution/distribution 的 checkHTTPRedirect，支持嵌套重定向并保留关键 headers
-func (p *ProxyServer) followRedirectWithSignedURL(w http.ResponseWriter, signedURL *url.URL) {
-	p.followRedirectWithSignedURLAndHeaders(w, signedURL, nil, 0)
-}
-
-// followRedirectWithSignedURLAndHeaders 跟随重定向，保留 Accept 和 Range headers
-// maxRedirects: 最大重定向次数，类似 distribution 的 10 次限制
-func (p *ProxyServer) followRedirectWithSignedURLAndHeaders(w http.ResponseWriter, targetURL *url.URL, originalHeaders http.Header, redirectCount int) {
-	const maxRedirects = 10
-
-	if redirectCount >= maxRedirects {
-		if p.config.Debug {
-			log.Printf("[DEBUG] Max redirects (%d) exceeded", maxRedirects)
-		}
-		p.writeErrorResponse(w, "too many redirects", http.StatusBadGateway)
-		return
-	}
-
-	if p.config.Debug {
-		log.Printf("[DEBUG] Following redirect (%d/%d): %s", redirectCount+1, maxRedirects, targetURL.String())
-	}
-
-	// 创建新的 GET 请求，不带原始请求的认证信息
-	req, err := http.NewRequest("GET", targetURL.String(), nil)
-	if err != nil {
-		if p.config.Debug {
-			log.Printf("[DEBUG] Failed to create redirect request: %v", err)
-		}
-		p.writeErrorResponse(w, fmt.Sprintf("invalid redirect URL: %v", err), http.StatusBadGateway)
-		return
-	}
-
-	// 设置 User-Agent
-	req.Header.Set("User-Agent", "go-docker-proxy/1.0")
-
-	// 保留 Accept 和 Range headers（类似 distribution/distribution 的做法）
-	if originalHeaders != nil {
-		if accept := originalHeaders.Get("Accept"); accept != "" {
-			req.Header.Set("Accept", accept)
-		}
-		if rangeHeader := originalHeaders.Get("Range"); rangeHeader != "" {
-			req.Header.Set("Range", rangeHeader)
-		}
-	}
-
-	// 使用 RoundTrip 执行请求（不自动跟随重定向）
-	resp, err := p.transport.RoundTrip(req)
-	if err != nil {
-		if p.config.Debug {
-			log.Printf("[DEBUG] Redirect request error: %v", err)
-		}
-		p.writeErrorResponse(w, fmt.Sprintf("redirect request failed: %v", err), http.StatusBadGateway)
-		return
-	}
-	defer resp.Body.Close()
-
-	if p.config.Debug {
-		log.Printf("[DEBUG] Redirect response status: %d", resp.StatusCode)
-	}
-
-	// 处理嵌套重定向
-	if resp.StatusCode == http.StatusMovedPermanently ||
-		resp.StatusCode == http.StatusFound ||
-		resp.StatusCode == http.StatusSeeOther ||
-		resp.StatusCode == http.StatusTemporaryRedirect ||
-		resp.StatusCode == http.StatusPermanentRedirect {
-
-		location := resp.Header.Get("Location")
-		if location != "" {
-			nextURL, err := url.Parse(location)
-			if err == nil {
-				// 继续跟随重定向
-				p.followRedirectWithSignedURLAndHeaders(w, nextURL, req.Header, redirectCount+1)
-				return
-			}
-		}
-	}
-
-	// 如果返回 400/403，说明签名问题，记录详细错误
+	// 如果返回 400/403,说明签名问题,记录详细错误
 	if resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusForbidden {
 		if p.config.Debug {
 			bodyBytes, _ := io.ReadAll(resp.Body)
-			log.Printf("[DEBUG] Redirect error response: %s", string(bodyBytes))
-			// 重新创建响应 body
-			resp.Body = io.NopCloser(strings.NewReader(string(bodyBytes)))
+			log.Printf("[DEBUG] Signed URL error response: %s", string(bodyBytes))
 		}
 	}
 
-	// 返回最终响应
+	// 直接返回响应,不缓存签名 URL 的结果(因为 URL 有时效性)
 	p.copyResponseRoundTrip(w, resp)
 }
 
@@ -1225,56 +932,8 @@ func (p *ProxyServer) copyResponseWithCacheRoundTrip(w http.ResponseWriter, resp
 		return
 	}
 
-	// 判断请求类型
-	method := ""
-	if resp.Request != nil {
-		method = resp.Request.Method
-	}
-	isManifest := strings.Contains(cacheKey, "/manifests/")
-
-	// HEAD 请求：对于 manifest 需要缓存 headers，其他直接返回
-	if method == "HEAD" {
-		if isManifest && resp.StatusCode == http.StatusOK && shouldStore && p.cacheManager != nil {
-			// manifest HEAD 请求，缓存 headers 后返回
-			w.Header().Set("X-Cache", "MISS")
-			w.WriteHeader(resp.StatusCode)
-
-			// 异步存储 headers 到缓存
-			go func() {
-				mediaType := ""
-				if ct, ok := headersToCache["Content-Type"]; ok && len(ct) > 0 {
-					mediaType = ct[0]
-				}
-
-				digest := ""
-				if dcd, ok := headersToCache["Docker-Content-Digest"]; ok && len(dcd) > 0 {
-					digest = dcd[0]
-				}
-
-				entry := &CacheEntry{
-					Descriptor: Descriptor{
-						Digest:    digest,
-						MediaType: mediaType,
-					},
-					Headers:    headersToCache,
-					StatusCode: resp.StatusCode,
-					CachedAt:   time.Now(),
-					ExpiresAt:  time.Now().Add(p.config.CacheManifestTTL),
-				}
-				p.cacheManager.Put(cacheKey, entry)
-				if p.config.Debug {
-					log.Printf("[DEBUG] Cached manifest HEAD response: %s", cacheKey)
-				}
-			}()
-			return
-		}
-		// 非 manifest HEAD 请求，直接返回
-		w.WriteHeader(resp.StatusCode)
-		return
-	}
-
 	// 不需要缓存或非 200 响应，直接流式传输
-	if !shouldStore || resp.StatusCode != http.StatusOK || p.cacheManager == nil {
+	if !shouldStore || resp.StatusCode != http.StatusOK {
 		w.WriteHeader(resp.StatusCode)
 		if _, err := p.streamCopy(w, resp.Body); err != nil {
 			if p.config.Debug {
@@ -1344,74 +1003,20 @@ func (p *ProxyServer) copyResponseWithCacheRoundTrip(w http.ResponseWriter, resp
 	_, _ = w.Write(bodyBytes)
 
 	// 异步存储到缓存
-	go func() {
-		// 获取 mediaType
-		mediaType := ""
-		if ct, ok := headersToCache["Content-Type"]; ok && len(ct) > 0 {
-			mediaType = ct[0]
-		}
-
-		entry := &CacheEntry{
-			Descriptor: Descriptor{
-				Size:      int64(len(bodyBytes)),
-				MediaType: mediaType,
-			},
-			Data:       bodyBytes,
-			Headers:    headersToCache,
-			StatusCode: resp.StatusCode,
-			CachedAt:   time.Now(),
-			ExpiresAt:  time.Now().Add(p.config.CacheManifestTTL),
-		}
-		p.cacheManager.Put(cacheKey, entry)
-	}()
+	go p.cache.Set(cacheKey, bodyBytes, headersToCache, resp.StatusCode, 1*time.Hour)
 }
 
-// serveCachedEntry 提供缓存响应（用于小文件如 manifest）
-func (p *ProxyServer) serveCachedEntry(w http.ResponseWriter, entry *CacheEntry) {
-	for key, values := range entry.Headers {
+func (p *ProxyServer) serveCachedResponse(w http.ResponseWriter, item *CacheItem) {
+	for key, values := range item.Headers {
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
 	}
 
 	w.Header().Set("X-Cache", "HIT")
-	w.WriteHeader(entry.StatusCode)
-	if len(entry.Data) > 0 {
-		_, _ = w.Write(entry.Data)
-	}
-}
-
-// serveCachedHeadEntry 提供 HEAD 请求的缓存响应（只返回 headers）
-func (p *ProxyServer) serveCachedHeadEntry(w http.ResponseWriter, entry *CacheEntry) {
-	for key, values := range entry.Headers {
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
-	}
-
-	w.Header().Set("X-Cache", "HIT")
-	w.WriteHeader(entry.StatusCode)
-	// HEAD 请求不返回 body
-}
-
-// serveCachedBlobStream 流式提供 blob 缓存响应（用于大文件）
-func (p *ProxyServer) serveCachedBlobStream(w http.ResponseWriter, entry *CacheEntry, reader io.ReadCloser) {
-	defer reader.Close()
-
-	for key, values := range entry.Headers {
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
-	}
-
-	w.Header().Set("X-Cache", "HIT")
-	w.WriteHeader(entry.StatusCode)
-
-	// 使用流式复制，不占用大量内存
-	if _, err := p.streamCopy(w, reader); err != nil {
-		if p.config.Debug {
-			log.Printf("[DEBUG] Blob stream copy error: %v", err)
-		}
+	w.WriteHeader(item.StatusCode)
+	if len(item.Data) > 0 {
+		_, _ = w.Write(item.Data)
 	}
 }
 
@@ -1422,6 +1027,15 @@ func (p *ProxyServer) writeRoutesResponse(w http.ResponseWriter) {
 		"routes":  p.config.Routes,
 		"message": "Available registry routes",
 	})
+}
+
+func (p *ProxyServer) generateCacheKey(host, path string) string {
+	return fmt.Sprintf("%s%s", host, path)
+}
+
+func (p *ProxyServer) isCacheable(path string) bool {
+	return strings.Contains(path, "/manifests/") ||
+		strings.Contains(path, "/blobs/sha256:")
 }
 
 func (p *ProxyServer) writeErrorResponse(w http.ResponseWriter, message string, statusCode int) {
