@@ -199,6 +199,11 @@ ghcr.your-domain.com         A     YOUR_SERVER_IP
 - `GET /v2/`: Docker Registry v2 API根路径
 - `GET /v2/auth`: 认证接口
 - `GET /v2/*`: 其他Docker Registry API请求
+- `GET /health`, `GET /healthz`: 健康检查端点
+- `GET /stats`: 系统统计信息（包含缓存命中率、请求数等）
+- `GET /stats/cache`: 详细缓存统计信息
+
+> **⚠️ 安全提示**: `/stats` 和 `/stats/cache` 端点当前未实施访问控制，会公开缓存配置、命中率、文件路径等内部运营数据。在生产环境中，建议通过反向代理（如 Nginx）限制这些端点的访问，或仅允许内部网络访问。
 
 ### 路由查询
 
