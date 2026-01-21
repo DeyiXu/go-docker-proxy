@@ -13,7 +13,6 @@ services:
       - CACHE_ENABLED=true  # true=启用缓存, false=禁用缓存
       - CACHE_MANIFEST_TTL=1d   # manifest by tag 缓存时间 (支持: 1h, 1d, 1w, 1M, 1y)
       - CACHE_BLOB_TTL=1y       # blob 缓存时间 (SHA256 内容不可变)
-      - FOLLOW_ALL_REDIRECTS=true  # true=跟随所有重定向并缓存, false=外部存储返回302给客户端
       
       # 黑名单配置 (访问受限的域名，逗号分隔)
       # 示例: BLOCKED_HOSTS=example.com,another.com
