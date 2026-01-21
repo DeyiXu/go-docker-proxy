@@ -132,6 +132,10 @@ func (m *InflightManager) TryStart(key string) (isFirst bool, wait func(ctx cont
 		return false, func(ctx context.Context) error {
 			select {
 			case <-entry.done:
+				// 成功完成，减少 watchers 计数
+				m.mu.Lock()
+				entry.watchers--
+				m.mu.Unlock()
 				return entry.err
 			case <-ctx.Done():
 				m.mu.Lock()

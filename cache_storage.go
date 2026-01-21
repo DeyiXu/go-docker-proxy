@@ -179,10 +179,17 @@ func (s *FileBlobStore) Put(ctx context.Context, digest string, content io.Reade
 		FilePath:  path,
 	}
 
-	metaBytes, _ := json.Marshal(meta)
+	metaBytes, err := json.Marshal(meta)
+	if err != nil {
+		// 元数据序列化失败，删除数据文件以避免产生孤立文件
+		_ = os.Remove(path)
+		return fmt.Errorf("failed to marshal blob metadata: %w", err)
+	}
+
 	if err := os.WriteFile(path+".meta", metaBytes, 0o644); err != nil {
-		// 元数据保存失败不是致命错误
-		fmt.Printf("Warning: failed to save blob metadata: %v\n", err)
+		// 元数据保存失败视为致命错误，删除数据文件以避免产生孤立文件
+		_ = os.Remove(path)
+		return fmt.Errorf("failed to save blob metadata: %w", err)
 	}
 
 	// 更新索引
@@ -275,7 +282,13 @@ func (s *FileBlobStore) Cleanup(maxSize int64) int {
 // LoadIndex 加载现有缓存索引
 func (s *FileBlobStore) LoadIndex() (count int64, manifestCount int64, totalSize int64) {
 	filepath.Walk(s.dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
+		if err != nil {
+			// 记录错误但继续处理其他文件
+			fmt.Printf("Warning: error accessing path %s: %v\n", path, err)
+			return nil
+		}
+		
+		if info.IsDir() {
 			return nil
 		}
 
@@ -286,11 +299,13 @@ func (s *FileBlobStore) LoadIndex() (count int64, manifestCount int64, totalSize
 
 		metaBytes, err := os.ReadFile(path)
 		if err != nil {
+			fmt.Printf("Warning: failed to read metadata file %s: %v\n", path, err)
 			return nil
 		}
 
 		var meta blobMeta
 		if err := json.Unmarshal(metaBytes, &meta); err != nil {
+			fmt.Printf("Warning: failed to unmarshal metadata file %s: %v\n", path, err)
 			return nil
 		}
 
@@ -320,9 +335,14 @@ func (s *FileBlobStore) LoadIndex() (count int64, manifestCount int64, totalSize
 func (s *FileBlobStore) getPath(digest string) string {
 	// 移除 sha256: 前缀
 	hash := strings.TrimPrefix(digest, "sha256:")
+	
+	// 兜底保护：确保 hash 至少有 4 个字符，避免切片越界
+	// hashKey 总是返回 64 字符的 SHA256 哈希，但为了防御性编程保留此检查
 	if len(hash) < 4 {
-		hash = hashKey(digest)
+		sum := sha256.Sum256([]byte(digest))
+		hash = hex.EncodeToString(sum[:])
 	}
+	
 	// 使用前 4 个字符分层
 	return filepath.Join(s.dir, hash[:2], hash[2:4], hash)
 }

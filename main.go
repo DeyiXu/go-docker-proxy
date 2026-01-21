@@ -653,7 +653,16 @@ func (p *ProxyServer) handleV2Request(w http.ResponseWriter, r *http.Request) {
 		// 请求完成后调用 done 通知等待者
 		defer func() {
 			// 检查是否已缓存
-			_, cached := p.cacheManager.Get(cacheKey)
+			// 对于 blob，需要验证文件实际存在而不仅仅是元数据
+			cached := false
+			pathType, _, _ := ParsePath(cacheKey)
+			if pathType == "blob" {
+				_, _, ok := p.cacheManager.GetBlobReader(cacheKey)
+				cached = ok
+			} else {
+				_, cached = p.cacheManager.Get(cacheKey)
+			}
+			
 			done(&InflightResult{
 				CacheKey: cacheKey,
 				Cached:   cached,
@@ -1251,9 +1260,18 @@ func (p *ProxyServer) copyResponseWithCacheRoundTrip(w http.ResponseWriter, resp
 					digest = dcd[0]
 				}
 
+				// 从 Content-Length 获取大小
+				size := int64(0)
+				if cl, ok := headersToCache["Content-Length"]; ok && len(cl) > 0 {
+					if parsedSize, err := strconv.ParseInt(cl[0], 10, 64); err == nil {
+						size = parsedSize
+					}
+				}
+
 				entry := &CacheEntry{
 					Descriptor: Descriptor{
 						Digest:    digest,
+						Size:      size,
 						MediaType: mediaType,
 					},
 					Headers:    headersToCache,
