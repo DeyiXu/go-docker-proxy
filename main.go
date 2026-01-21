@@ -1093,6 +1093,12 @@ func (p *ProxyServer) copyResponseWithCacheRoundTrip(w http.ResponseWriter, resp
 		return
 	}
 
+	// HEAD 请求不缓存（没有 body），直接返回
+	if resp.Request != nil && resp.Request.Method == "HEAD" {
+		w.WriteHeader(resp.StatusCode)
+		return
+	}
+
 	// 不需要缓存或非 200 响应，直接流式传输
 	if !shouldStore || resp.StatusCode != http.StatusOK || p.cacheManager == nil {
 		w.WriteHeader(resp.StatusCode)
