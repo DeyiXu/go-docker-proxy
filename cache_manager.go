@@ -398,10 +398,14 @@ func (cm *CacheManager) Get(cacheKey string) (*CacheEntry, bool) {
 			entry, reader, err := cm.GetBlob(ctx, cacheKey, digest)
 			if err == nil && entry != nil {
 				if reader != nil {
-					// 读取 blob 内容
 					defer reader.Close()
-					// 对于小 blob，读取到内存
-					// 对于大 blob，这里只返回元数据
+					// 读取 blob 内容到 entry.Data
+					data, err := io.ReadAll(reader)
+					if err != nil {
+						return nil, false
+					}
+					entry.Data = data
+					entry.StatusCode = http.StatusOK
 				}
 				return entry, true
 			}
