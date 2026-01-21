@@ -95,8 +95,8 @@ type InflightManager struct {
 	mu       sync.Mutex
 	inflight map[string]*inflightEntry
 
-	totalRequests int64
-	deduplicated  int64
+	totalRequests atomic.Int64
+	deduplicated  atomic.Int64
 }
 
 type inflightEntry struct {
@@ -122,12 +122,12 @@ func (m *InflightManager) TryStart(key string) (isFirst bool, wait func(ctx cont
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.totalRequests++
+	m.totalRequests.Add(1)
 
 	// 检查是否已有请求
 	if entry, exists := m.inflight[key]; exists {
 		entry.watchers++
-		m.deduplicated++
+		m.deduplicated.Add(1)
 
 		return false, func(ctx context.Context) error {
 			select {
@@ -163,21 +163,23 @@ func (m *InflightManager) TryStart(key string) (isFirst bool, wait func(ctx cont
 // Stats 获取统计信息
 func (m *InflightManager) Stats() map[string]interface{} {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	activeKeys := make([]string, 0, len(m.inflight))
 	for key := range m.inflight {
 		activeKeys = append(activeKeys, key)
 	}
+	m.mu.Unlock()
+
+	totalReqs := m.totalRequests.Load()
+	dedup := m.deduplicated.Load()
 
 	savingsRate := float64(0)
-	if m.totalRequests > 0 {
-		savingsRate = float64(m.deduplicated) / float64(m.totalRequests) * 100
+	if totalReqs > 0 {
+		savingsRate = float64(dedup) / float64(totalReqs) * 100
 	}
 
 	return map[string]interface{}{
-		"totalRequests": m.totalRequests,
-		"deduplicated":  m.deduplicated,
+		"totalRequests": totalReqs,
+		"deduplicated":  dedup,
 		"savingsRate":   savingsRate,
 		"currentActive": len(m.inflight),
 		"activeKeys":    activeKeys,

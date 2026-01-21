@@ -448,9 +448,11 @@ func (s *FileManifestStore) Cleanup() int {
 	}
 	s.mu.RUnlock()
 
-	for _, key := range toDelete {
+	if len(toDelete) > 0 {
 		s.mu.Lock()
-		delete(s.index, key)
+		for _, key := range toDelete {
+			delete(s.index, key)
+		}
 		s.mu.Unlock()
 	}
 
@@ -511,6 +513,11 @@ func (s *FileManifestStore) getPath(repo, reference string) string {
 // =============================================================================
 // 辅助函数
 // =============================================================================
+
+func hashKey(key string) string {
+	hash := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(hash[:])
+}
 
 func copyFile(src, dst string) error {
 	srcFile, err := os.Open(src)
