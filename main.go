@@ -1259,7 +1259,7 @@ func (p *ProxyServer) copyResponseWithCacheRoundTrip(w http.ResponseWriter, resp
 					Headers:    headersToCache,
 					StatusCode: resp.StatusCode,
 					CachedAt:   time.Now(),
-					ExpiresAt:  time.Now().Add(1 * time.Hour),
+					ExpiresAt:  time.Now().Add(p.config.CacheManifestTTL),
 				}
 				p.cacheManager.Put(cacheKey, entry)
 				if p.config.Debug {
@@ -1360,7 +1360,7 @@ func (p *ProxyServer) copyResponseWithCacheRoundTrip(w http.ResponseWriter, resp
 			Headers:    headersToCache,
 			StatusCode: resp.StatusCode,
 			CachedAt:   time.Now(),
-			ExpiresAt:  time.Now().Add(1 * time.Hour),
+			ExpiresAt:  time.Now().Add(p.config.CacheManifestTTL),
 		}
 		p.cacheManager.Put(cacheKey, entry)
 	}()

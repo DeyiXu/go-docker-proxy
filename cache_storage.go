@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -247,13 +248,9 @@ func (s *FileBlobStore) Cleanup(maxSize int64) int {
 		s.mu.RUnlock()
 
 		// 按缓存时间排序（最老的在前）
-		for i := 0; i < len(blobs)-1; i++ {
-			for j := i + 1; j < len(blobs); j++ {
-				if blobs[j].cachedAt.Before(blobs[i].cachedAt) {
-					blobs[i], blobs[j] = blobs[j], blobs[i]
-				}
-			}
-		}
+		sort.Slice(blobs, func(i, j int) bool {
+			return blobs[i].cachedAt.Before(blobs[j].cachedAt)
+		})
 
 		// 删除最老的直到大小合适
 		var lruToDelete []string
