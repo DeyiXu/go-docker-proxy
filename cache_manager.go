@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -421,10 +422,16 @@ func (cm *CacheManager) Put(cacheKey string, entry *CacheEntry) error {
 		// Manifest 存储需要数据
 		return cm.manifestStore.Put(ctx, repo, reference, entry)
 	case "blob":
-		// Blob 存储由其他方法处理
-		// 这里仅更新描述符缓存
+		// Blob 存储：写入实际数据到文件存储
 		digest := GetDigestFromPath(cacheKey)
-		if digest != "" {
+		if digest != "" && len(entry.Data) > 0 {
+			// 使用 bytes.NewReader 创建 io.Reader
+			reader := bytes.NewReader(entry.Data)
+			if err := cm.PutBlob(ctx, cacheKey, digest, reader, int64(len(entry.Data)), entry.Headers); err != nil {
+				return err
+			}
+		} else if digest != "" {
+			// 仅更新描述符缓存（无数据时）
 			cm.descriptorCache.Set(digest, entry.Descriptor)
 		}
 	}
