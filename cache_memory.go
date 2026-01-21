@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/golang-lru/v2/expirable"
@@ -17,8 +18,8 @@ type LRUDescriptorCache struct {
 	cache *expirable.LRU[string, Descriptor]
 	mu    sync.RWMutex
 
-	hits   int64
-	misses int64
+	hits   atomic.Int64
+	misses atomic.Int64
 }
 
 // NewLRUDescriptorCache 创建 LRU 描述符缓存
@@ -41,10 +42,10 @@ func (c *LRUDescriptorCache) Get(key string) (Descriptor, bool) {
 
 	desc, ok := c.cache.Get(key)
 	if ok {
-		c.hits++
+		c.hits.Add(1)
 		return desc, true
 	}
-	c.misses++
+	c.misses.Add(1)
 	return Descriptor{}, false
 }
 
@@ -69,16 +70,18 @@ func (c *LRUDescriptorCache) Stats() map[string]interface{} {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	total := c.hits + c.misses
+	hits := c.hits.Load()
+	misses := c.misses.Load()
+	total := hits + misses
 	hitRate := float64(0)
 	if total > 0 {
-		hitRate = float64(c.hits) / float64(total) * 100
+		hitRate = float64(hits) / float64(total) * 100
 	}
 
 	return map[string]interface{}{
 		"size":    c.cache.Len(),
-		"hits":    c.hits,
-		"misses":  c.misses,
+		"hits":    hits,
+		"misses":  misses,
 		"hitRate": hitRate,
 	}
 }

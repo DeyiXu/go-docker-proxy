@@ -226,23 +226,50 @@ func (s *FileBlobStore) Cleanup(maxSize int64) int {
 		s.Delete(context.Background(), digest)
 	}
 
-	// 如果超过大小限制，按 LRU 删除（简化实现：随机删除）
+	// 如果超过大小限制，按 LRU（最老的先删除）删除
 	if totalSize > maxSize {
+		// 收集所有未过期的 blob，按缓存时间排序
+		type blobInfo struct {
+			digest   string
+			cachedAt time.Time
+			size     int64
+		}
+		var blobs []blobInfo
+
 		s.mu.RLock()
-		for digest := range s.index {
-			if totalSize <= maxSize {
-				break
-			}
-			if meta, ok := s.index[digest]; ok {
-				totalSize -= meta.Size
-				toDelete = append(toDelete, digest)
-			}
+		for digest, meta := range s.index {
+			blobs = append(blobs, blobInfo{
+				digest:   digest,
+				cachedAt: meta.CachedAt,
+				size:     meta.Size,
+			})
 		}
 		s.mu.RUnlock()
 
-		for _, digest := range toDelete {
+		// 按缓存时间排序（最老的在前）
+		for i := 0; i < len(blobs)-1; i++ {
+			for j := i + 1; j < len(blobs); j++ {
+				if blobs[j].cachedAt.Before(blobs[i].cachedAt) {
+					blobs[i], blobs[j] = blobs[j], blobs[i]
+				}
+			}
+		}
+
+		// 删除最老的直到大小合适
+		var lruToDelete []string
+		for _, b := range blobs {
+			if totalSize <= maxSize {
+				break
+			}
+			totalSize -= b.size
+			lruToDelete = append(lruToDelete, b.digest)
+		}
+
+		for _, digest := range lruToDelete {
 			s.Delete(context.Background(), digest)
 		}
+
+		toDelete = append(toDelete, lruToDelete...)
 	}
 
 	return len(toDelete)

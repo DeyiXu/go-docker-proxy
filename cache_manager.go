@@ -405,16 +405,8 @@ func (cm *CacheManager) Get(cacheKey string) (*CacheEntry, bool) {
 				entry := &CacheEntry{
 					Descriptor: desc,
 					StatusCode: http.StatusOK,
-					Headers:    make(map[string][]string),
 				}
-				// 设置必要的响应头
-				entry.Headers["Content-Length"] = []string{strconv.FormatInt(desc.Size, 10)}
-				if desc.MediaType != "" {
-					entry.Headers["Content-Type"] = []string{desc.MediaType}
-				} else {
-					entry.Headers["Content-Type"] = []string{"application/octet-stream"}
-				}
-				entry.Headers["Docker-Content-Digest"] = []string{desc.Digest}
+				cm.setBlobHeaders(entry)
 				return entry, true
 			}
 			cm.stats.BlobMisses.Add(1)
@@ -422,6 +414,20 @@ func (cm *CacheManager) Get(cacheKey string) (*CacheEntry, bool) {
 	}
 
 	return nil, false
+}
+
+// setBlobHeaders 设置 blob 响应的标准 headers
+func (cm *CacheManager) setBlobHeaders(entry *CacheEntry) {
+	if entry.Headers == nil {
+		entry.Headers = make(map[string][]string)
+	}
+	entry.Headers["Content-Length"] = []string{strconv.FormatInt(entry.Descriptor.Size, 10)}
+	if entry.Descriptor.MediaType != "" {
+		entry.Headers["Content-Type"] = []string{entry.Descriptor.MediaType}
+	} else {
+		entry.Headers["Content-Type"] = []string{"application/octet-stream"}
+	}
+	entry.Headers["Docker-Content-Digest"] = []string{entry.Descriptor.Digest}
 }
 
 // GetBlobReader 获取 blob 的流式 reader（用于大文件流式传输）
@@ -437,18 +443,7 @@ func (cm *CacheManager) GetBlobReader(cacheKey string) (*CacheEntry, io.ReadClos
 		return nil, nil, false
 	}
 
-	// 设置必要的响应头
-	if entry.Headers == nil {
-		entry.Headers = make(map[string][]string)
-	}
-	entry.Headers["Content-Length"] = []string{strconv.FormatInt(entry.Descriptor.Size, 10)}
-	if entry.Descriptor.MediaType != "" {
-		entry.Headers["Content-Type"] = []string{entry.Descriptor.MediaType}
-	} else {
-		entry.Headers["Content-Type"] = []string{"application/octet-stream"}
-	}
-	entry.Headers["Docker-Content-Digest"] = []string{entry.Descriptor.Digest}
-
+	cm.setBlobHeaders(entry)
 	return entry, reader, true
 }
 
