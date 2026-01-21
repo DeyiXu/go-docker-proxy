@@ -217,12 +217,13 @@ func (p *ProxyServer) Start() {
 	r := chi.NewRouter()
 
 	// 添加中间件
+	r.Use(middleware.RealIP)
+	r.Use(middleware.RequestID)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(60 * time.Second))
 
 	if p.config.Debug {
-		r.Use(middleware.RequestID)
 		log.Println("[DEBUG] Debug mode enabled")
 	}
 
@@ -662,7 +663,7 @@ func (p *ProxyServer) handleV2Request(w http.ResponseWriter, r *http.Request) {
 			} else {
 				_, cached = p.cacheManager.Get(cacheKey)
 			}
-			
+
 			done(&InflightResult{
 				CacheKey: cacheKey,
 				Cached:   cached,
