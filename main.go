@@ -559,15 +559,28 @@ func (p *ProxyServer) handleV2Request(w http.ResponseWriter, r *http.Request) {
 	// 生成缓存键
 	cacheKey := CacheKey(r.Host, r.URL.Path)
 	isCacheableRequest := IsCacheable(r.URL.Path)
+	isBlob := strings.Contains(r.URL.Path, "/blobs/")
 
 	// 检查缓存（如果启用）
 	if p.config.CacheEnabled && isCacheableRequest && p.cacheManager != nil {
-		if entry, found := p.cacheManager.Get(cacheKey); found {
-			if p.config.Debug {
-				log.Printf("[DEBUG] /v2/* Cache HIT: %s", r.URL.Path)
+		// 对于 blob 使用流式传输
+		if isBlob {
+			if entry, reader, found := p.cacheManager.GetBlobReader(cacheKey); found {
+				if p.config.Debug {
+					log.Printf("[DEBUG] /v2/* Cache HIT (streaming): %s", r.URL.Path)
+				}
+				p.serveCachedBlobStream(w, entry, reader)
+				return
 			}
-			p.serveCachedEntry(w, entry)
-			return
+		} else {
+			// manifest 等小文件使用内存缓存
+			if entry, found := p.cacheManager.Get(cacheKey); found {
+				if p.config.Debug {
+					log.Printf("[DEBUG] /v2/* Cache HIT: %s", r.URL.Path)
+				}
+				p.serveCachedEntry(w, entry)
+				return
+			}
 		}
 		if p.config.Debug {
 			log.Printf("[DEBUG] /v2/* Cache MISS: %s", r.URL.Path)
@@ -597,7 +610,16 @@ func (p *ProxyServer) handleV2Request(w http.ResponseWriter, r *http.Request) {
 
 			// 第一个请求已完成，从缓存获取结果
 			if result != nil && result.Cached {
-				if entry, found := p.cacheManager.Get(cacheKey); found {
+				// 对于 blob 使用流式传输
+				if isBlob {
+					if entry, reader, found := p.cacheManager.GetBlobReader(cacheKey); found {
+						if p.config.Debug {
+							log.Printf("[DEBUG] /v2/* Inflight cache HIT (streaming): %s", r.URL.Path)
+						}
+						p.serveCachedBlobStream(w, entry, reader)
+						return
+					}
+				} else if entry, found := p.cacheManager.Get(cacheKey); found {
 					if p.config.Debug {
 						log.Printf("[DEBUG] /v2/* Inflight cache HIT: %s", r.URL.Path)
 					}
@@ -1292,7 +1314,7 @@ func (p *ProxyServer) copyResponseWithCacheRoundTrip(w http.ResponseWriter, resp
 	}()
 }
 
-// serveCachedEntry 提供缓存响应
+// serveCachedEntry 提供缓存响应（用于小文件如 manifest）
 func (p *ProxyServer) serveCachedEntry(w http.ResponseWriter, entry *CacheEntry) {
 	for key, values := range entry.Headers {
 		for _, value := range values {
@@ -1304,6 +1326,27 @@ func (p *ProxyServer) serveCachedEntry(w http.ResponseWriter, entry *CacheEntry)
 	w.WriteHeader(entry.StatusCode)
 	if len(entry.Data) > 0 {
 		_, _ = w.Write(entry.Data)
+	}
+}
+
+// serveCachedBlobStream 流式提供 blob 缓存响应（用于大文件）
+func (p *ProxyServer) serveCachedBlobStream(w http.ResponseWriter, entry *CacheEntry, reader io.ReadCloser) {
+	defer reader.Close()
+
+	for key, values := range entry.Headers {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+
+	w.Header().Set("X-Cache", "HIT")
+	w.WriteHeader(entry.StatusCode)
+
+	// 使用流式复制，不占用大量内存
+	if _, err := p.streamCopy(w, reader); err != nil {
+		if p.config.Debug {
+			log.Printf("[DEBUG] Blob stream copy error: %v", err)
+		}
 	}
 }
 

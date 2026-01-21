@@ -382,6 +382,7 @@ func (cm *CacheManager) TryInflight(key string) (bool, func(context.Context) (*I
 // =============================================================================
 
 // Get 获取缓存条目（统一接口）
+// 注意：对于 blob 类型，建议使用 GetBlobReader 进行流式传输
 func (cm *CacheManager) Get(cacheKey string) (*CacheEntry, bool) {
 	pathType, repo, reference := ParsePath(cacheKey)
 
@@ -394,36 +395,59 @@ func (cm *CacheManager) Get(cacheKey string) (*CacheEntry, bool) {
 			return entry, true
 		}
 	case "blob":
+		// 对于 blob，仅返回元数据（检查是否存在）
+		// 实际数据通过 GetBlobReader 流式读取
 		digest := GetDigestFromPath(cacheKey)
 		if digest != "" {
-			entry, reader, err := cm.GetBlob(ctx, cacheKey, digest)
-			if err == nil && entry != nil {
-				if reader != nil {
-					defer reader.Close()
-					// 读取 blob 内容到 entry.Data
-					data, err := io.ReadAll(reader)
-					if err != nil {
-						return nil, false
-					}
-					entry.Data = data
-					entry.StatusCode = http.StatusOK
-
-					// 设置必要的响应头（Docker 客户端需要这些头来显示进度）
-					if entry.Headers == nil {
-						entry.Headers = make(map[string][]string)
-					}
-					entry.Headers["Content-Length"] = []string{strconv.FormatInt(int64(len(data)), 10)}
-					entry.Headers["Content-Type"] = []string{"application/octet-stream"}
-					if entry.Descriptor.Digest != "" {
-						entry.Headers["Docker-Content-Digest"] = []string{entry.Descriptor.Digest}
-					}
+			desc, err := cm.blobStore.Stat(ctx, digest)
+			if err == nil {
+				cm.stats.BlobHits.Add(1)
+				entry := &CacheEntry{
+					Descriptor: desc,
+					StatusCode: http.StatusOK,
+					Headers:    make(map[string][]string),
 				}
+				// 设置必要的响应头
+				entry.Headers["Content-Length"] = []string{strconv.FormatInt(desc.Size, 10)}
+				entry.Headers["Content-Type"] = []string{"application/octet-stream"}
+				if desc.MediaType != "" {
+					entry.Headers["Content-Type"] = []string{desc.MediaType}
+				}
+				entry.Headers["Docker-Content-Digest"] = []string{desc.Digest}
 				return entry, true
 			}
+			cm.stats.BlobMisses.Add(1)
 		}
 	}
 
 	return nil, false
+}
+
+// GetBlobReader 获取 blob 的流式 reader（用于大文件流式传输）
+func (cm *CacheManager) GetBlobReader(cacheKey string) (*CacheEntry, io.ReadCloser, bool) {
+	digest := GetDigestFromPath(cacheKey)
+	if digest == "" {
+		return nil, nil, false
+	}
+
+	ctx := context.Background()
+	entry, reader, err := cm.GetBlob(ctx, cacheKey, digest)
+	if err != nil || entry == nil {
+		return nil, nil, false
+	}
+
+	// 设置必要的响应头
+	if entry.Headers == nil {
+		entry.Headers = make(map[string][]string)
+	}
+	entry.Headers["Content-Length"] = []string{strconv.FormatInt(entry.Descriptor.Size, 10)}
+	entry.Headers["Content-Type"] = []string{"application/octet-stream"}
+	if entry.Descriptor.MediaType != "" {
+		entry.Headers["Content-Type"] = []string{entry.Descriptor.MediaType}
+	}
+	entry.Headers["Docker-Content-Digest"] = []string{entry.Descriptor.Digest}
+
+	return entry, reader, true
 }
 
 // Put 存储缓存条目（统一接口）
