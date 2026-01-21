@@ -560,6 +560,7 @@ func (p *ProxyServer) handleV2Request(w http.ResponseWriter, r *http.Request) {
 	cacheKey := CacheKey(r.Host, r.URL.Path)
 	isCacheableRequest := IsCacheable(r.URL.Path)
 	isBlob := strings.Contains(r.URL.Path, "/blobs/")
+	isHead := r.Method == "HEAD"
 
 	// 检查缓存（如果启用）
 	if p.config.CacheEnabled && isCacheableRequest && p.cacheManager != nil {
@@ -569,7 +570,12 @@ func (p *ProxyServer) handleV2Request(w http.ResponseWriter, r *http.Request) {
 				if p.config.Debug {
 					log.Printf("[DEBUG] /v2/* Cache HIT (streaming): %s", r.URL.Path)
 				}
-				p.serveCachedBlobStream(w, entry, reader)
+				if isHead {
+					reader.Close() // HEAD 请求不需要 body
+					p.serveCachedHeadEntry(w, entry)
+				} else {
+					p.serveCachedBlobStream(w, entry, reader)
+				}
 				return
 			}
 		} else {
@@ -578,7 +584,11 @@ func (p *ProxyServer) handleV2Request(w http.ResponseWriter, r *http.Request) {
 				if p.config.Debug {
 					log.Printf("[DEBUG] /v2/* Cache HIT: %s", r.URL.Path)
 				}
-				p.serveCachedEntry(w, entry)
+				if isHead {
+					p.serveCachedHeadEntry(w, entry)
+				} else {
+					p.serveCachedEntry(w, entry)
+				}
 				return
 			}
 		}
@@ -1327,6 +1337,19 @@ func (p *ProxyServer) serveCachedEntry(w http.ResponseWriter, entry *CacheEntry)
 	if len(entry.Data) > 0 {
 		_, _ = w.Write(entry.Data)
 	}
+}
+
+// serveCachedHeadEntry 提供 HEAD 请求的缓存响应（只返回 headers）
+func (p *ProxyServer) serveCachedHeadEntry(w http.ResponseWriter, entry *CacheEntry) {
+	for key, values := range entry.Headers {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+
+	w.Header().Set("X-Cache", "HIT")
+	w.WriteHeader(entry.StatusCode)
+	// HEAD 请求不返回 body
 }
 
 // serveCachedBlobStream 流式提供 blob 缓存响应（用于大文件）
