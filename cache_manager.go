@@ -103,14 +103,15 @@ func (s *CacheStatistics) Snapshot() map[string]interface{} {
 	manifestMisses := s.ManifestMisses.Load()
 	manifestTotal := manifestHits + manifestMisses
 
-	blobHitRate := float64(0)
+	// 计算命中率，无请求时显示 N/A
+	blobHitRate := "N/A"
 	if blobTotal > 0 {
-		blobHitRate = float64(blobHits) / float64(blobTotal) * 100
+		blobHitRate = fmt.Sprintf("%.2f%%", float64(blobHits)/float64(blobTotal)*100)
 	}
 
-	manifestHitRate := float64(0)
+	manifestHitRate := "N/A"
 	if manifestTotal > 0 {
-		manifestHitRate = float64(manifestHits) / float64(manifestTotal) * 100
+		manifestHitRate = fmt.Sprintf("%.2f%%", float64(manifestHits)/float64(manifestTotal)*100)
 	}
 
 	return map[string]interface{}{
@@ -119,14 +120,14 @@ func (s *CacheStatistics) Snapshot() map[string]interface{} {
 			"requests": blobTotal,
 			"hits":     blobHits,
 			"misses":   blobMisses,
-			"hitRate":  fmt.Sprintf("%.2f%%", blobHitRate),
+			"hitRate":  blobHitRate,
 		},
 		"manifest": map[string]interface{}{
 			"count":    s.ManifestCount.Load(),
 			"requests": manifestTotal,
 			"hits":     manifestHits,
 			"misses":   manifestMisses,
-			"hitRate":  fmt.Sprintf("%.2f%%", manifestHitRate),
+			"hitRate":  manifestHitRate,
 		},
 		"totalSize":      s.TotalSize.Load(),
 		"totalSizeHuman": formatBytes(s.TotalSize.Load()),
