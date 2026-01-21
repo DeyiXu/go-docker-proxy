@@ -230,7 +230,11 @@ func NewCacheManager(config *CacheConfig) (*CacheManager, error) {
 	go cm.cleanupLoop()
 
 	// 启动时加载索引
-	go cm.loadIndex()
+	cm.wg.Add(1)
+	go func() {
+		defer cm.wg.Done()
+		cm.loadIndex()
+	}()
 
 	return cm, nil
 }
@@ -337,6 +341,7 @@ func (cm *CacheManager) PutManifest(ctx context.Context, repo, reference string,
 		},
 		Headers:    headers,
 		StatusCode: statusCode,
+		Data:       data, // 存储 manifest 内容
 		CachedAt:   time.Now(),
 	}
 
@@ -539,12 +544,36 @@ func IsCacheable(path string) bool {
 }
 
 // GetDigestFromPath 从路径提取 digest
+// 返回完整的 digest（sha256:xxx 格式），如果路径不包含有效的 digest 则返回空字符串
 func GetDigestFromPath(path string) string {
 	if idx := strings.Index(path, "sha256:"); idx != -1 {
-		end := idx + 71 // sha256: + 64 hex chars
-		if end <= len(path) {
-			return path[idx:end]
+		// SHA256 digest 格式: sha256: (7 chars) + 64 hex chars = 71 chars total
+		const digestLength = 71
+		end := idx + digestLength
+		
+		// 检查是否有足够的字符来形成完整的 digest
+		if end > len(path) {
+			// 路径被截断，无法提取有效的 digest
+			return ""
 		}
+		
+		digest := path[idx:end]
+		
+		// 验证提取的 digest 是否符合 SHA256 格式
+		// 应该是 "sha256:" 后跟 64 个十六进制字符
+		if len(digest) != digestLength {
+			return ""
+		}
+		
+		// 验证后缀是否都是十六进制字符
+		hashPart := digest[7:] // 跳过 "sha256:" 前缀
+		for _, c := range hashPart {
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+				return ""
+			}
+		}
+		
+		return digest
 	}
 	return ""
 }
