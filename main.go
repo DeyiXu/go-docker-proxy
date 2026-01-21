@@ -1276,7 +1276,6 @@ func (p *ProxyServer) copyResponseWithCacheRoundTrip(w http.ResponseWriter, resp
 					},
 					Headers:    headersToCache,
 					StatusCode: resp.StatusCode,
-					Data:       nil, // HEAD 请求不包含实际内容
 					CachedAt:   time.Now(),
 					ExpiresAt:  time.Now().Add(p.config.CacheManifestTTL),
 				}

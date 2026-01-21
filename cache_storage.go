@@ -335,11 +335,9 @@ func (s *FileBlobStore) LoadIndex() (count int64, manifestCount int64, totalSize
 func (s *FileBlobStore) getPath(digest string) string {
 	// 移除 sha256: 前缀
 	hash := strings.TrimPrefix(digest, "sha256:")
-	if len(hash) < 4 {
-		hash = hashKey(digest)
-	}
 	
 	// 兜底保护：确保 hash 至少有 4 个字符，避免切片越界
+	// hashKey 总是返回 64 字符的 SHA256 哈希，但为了防御性编程保留此检查
 	if len(hash) < 4 {
 		sum := sha256.Sum256([]byte(digest))
 		hash = hex.EncodeToString(sum[:])

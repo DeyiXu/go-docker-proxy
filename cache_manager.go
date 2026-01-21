@@ -559,12 +559,6 @@ func GetDigestFromPath(path string) string {
 		
 		digest := path[idx:end]
 		
-		// 验证提取的 digest 是否符合 SHA256 格式
-		// 应该是 "sha256:" 后跟 64 个十六进制字符
-		if len(digest) != digestLength {
-			return ""
-		}
-		
 		// 验证后缀是否都是十六进制字符
 		hashPart := digest[7:] // 跳过 "sha256:" 前缀
 		for _, c := range hashPart {
